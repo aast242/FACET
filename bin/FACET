@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+__author__ = "Alexander Stewart"
+__copyright__ = "Copyright 2021"
+__credits__ = ["Alexander Stewart"]
+__license__ = "GPL3"
+__maintainer__ = "Alexander Stewart"
+__status__ = "Development"
+
+import argparse
+import sys
+from facet_utils.defaults import ProgDefaults as dv
+from facet_utils.main import ProgParser
+
+
+def help_message():
+    print('')
+    print('  .:| ' + dv.PROG_NAME + ' ' + dv.PROG_VERSION + ' |:.\n''')
+    print('''\
+  database |  create a database and run %s; allows using multiple cores in BLASTn
+  db_free  |  run %s without creating a BLAST database
+  outfile  |  run %s on a previously generated BLAST output file
+  masker   |  use BLASTn to mask repetitive regions in the provided genome
+  
+  Use %s <module> -h to learn more about specific modules
+    ''' % (dv.PROG_NAME, dv.PROG_NAME, dv.PROG_NAME, dv.PROG_NAME))
+
+
+if __name__ == '__main__':
+    # ------------------------------------------------------------------------ #
+    # initialize the top-level parser and add the subparsers to the top parser #
+    # ------------------------------------------------------------------------ #
+    top_parser = argparse.ArgumentParser('%s' % dv.PROG_NAME, add_help=False)
+
+    # print help message if prog is called w/o subparser OR if subparser doesn't match any of the defined ones #
+    if len(top_parser.parse_known_args()[1]) == 0 or \
+            top_parser.parse_known_args()[1][0] not in dv.ACCEPTABLE_SUBPARSERS:
+        help_message()
+        exit()
+
+    subparsers = top_parser.add_subparsers(dest='subparser_id')
+
+    # ----------------------------------------------------------------------------------------------- #
+    # initialize parent parser for all subparsers that will clean blast outputs and/or change formats #
+    # ----------------------------------------------------------------------------------------------- #
+    cleaner_parent = argparse.ArgumentParser(add_help=False)
+    cleaner_parent.add_argument("-v", "--verbose", action='store_true', help="prints a lot more information")
+    cleaner_parent.add_argument("-c", "--nocat", action='store_true',
+                                help='does not remove redundancy between differing repeats'
+                                     ' (useful for identifying conserved sequence in multiple fastas)')
+    cleaner_parent.add_argument("-n", "--noclean", action='store_true',
+                                help='does not clean the BLAST report at any step'
+                                     ' (useful for retaining ALL data from a fasta input)')
+    cleaner_parent.add_argument("-g", "--writegff", action='store_true',
+                                help='writes a .gff file containing repeat location information')
+    cleaner_parent.add_argument("-s", "--writesam", action='store_true',
+                                help='writes a .sam file containing repeat location information'
+                                     ' (allows for more compact viewing in IGV)')
+    cleaner_parent.add_argument("-b", "--writebam", action='store_true',
+                                help='This option requires samtools! Writes a .bam file (and index)'
+                                     ' containing repeat location information'
+                                     ' (allows for more compact viewing in IGV)')
+    cleaner_parent.add_argument("-q", "--verboseoutput", action='store_true',
+                                help="writes sequence information to sam/bam outputs")
+    cleaner_parent.add_argument("--writefasta", default=0, type=int,
+                                help="writes fasta file of all hits longer than int specified", nargs='?')
+    cleaner_parent.add_argument("-x", "--nocsv", action='store_false',
+                                help='stops the program from outputting a csv file')
+    cleaner_parent.add_argument("-i", "--writetic", action='store_true', help="write a TIg Coverage file (.tic)")
+    cleaner_parent.add_argument("--buffer", default=dv.ALN_CLEANING_BUFFER, type=int,
+                                help='length in bp of a buffer to help with finding correct hits [default: %s]' %
+                                     dv.ALN_CLEANING_BUFFER,
+                                nargs='?')
+    cleaner_parent.add_argument("--force", action='store_true',
+                                help="forces the overwrite of existing data files")
+
+    # ----------------------------------------------------------------------------------------- #
+    # DATABASE PARSER: run FACET by creating a database for the genome in the subject datafield #
+    # ----------------------------------------------------------------------------------------- #
+    db_parser = subparsers.add_parser('database',
+                                      parents=[cleaner_parent],
+                                      aliases=['db'],
+                                      formatter_class=argparse.RawDescriptionHelpFormatter,
+                                      description='run %s by creating a database for the genome in the subject '
+                                                  'datafield' % dv.PROG_NAME,
+                                      epilog='Example: %s database <subject.fasta> <query.fasta> [options]' %
+                                             dv.PROG_NAME,
+                                      usage='%(prog)s <subject> <query> [options]')
+    db_parser.add_argument('subject', help="filepath to fasta that will be used as the subject", type=str)
+    db_parser.add_argument('query', help="filepath to fasta that will be used as the query")
+    db_parser.add_argument("-r", "--runshort", action='store_true', help='runs BLASTn-short in addition to BLASTn')
+    db_parser.add_argument("--shortonly", action='store_true', help='only runs BLASTn-short')
+    db_parser.add_argument("--blaste", default=dv.BLASTN_EVAL, type=str,
+                           help='e-value for the BLASTn [default: %s]' % dv.BLASTN_EVAL, nargs='?')
+    db_parser.add_argument("--shorte", default=dv.BLASTN_SHORT_EVAL, type=str,
+                           help='e-value for the BLASTn-short [default: %s]' % dv.BLASTN_SHORT_EVAL, nargs='?')
+    db_parser.add_argument("--num_threads", default=2, type=int,
+                           help="speeds up BLAST if your computer has multiple cores [default: 2]", nargs='?')
+    db_parser.add_argument("--overwritedb", action='store_true',
+                           help="If a BLAST database with the same name as the program's created database is present, "
+                                "forces overwrite of the database")
+    db_parser.add_argument("-t", "--notigcov", action='store_true', help="remove hits that cover the entire tig")
+    db_parser.add_argument("--makedb", action='store_false', help=argparse.SUPPRESS)
+    db_parser.add_argument("--outfmt_six", action='store_true', help=argparse.SUPPRESS)
+    # above argument needed for run_blast to use the '-db' flag. dummy option that users won't see.
+
+    # ----------------------------------------------------------- #
+    # DB_FREE PARSER: run FACET without creating a blast database #
+    # ----------------------------------------------------------- #
+    db_free_parser = subparsers.add_parser('db_free',
+                                           parents=[cleaner_parent],
+                                           aliases=['database_free', 'dbf'],
+                                           description='run FACET without creating a BLAST database',
+                                           epilog='Example: %s db_free <subject.fasta> <query.fasta> [options]' %
+                                                  dv.PROG_NAME,
+                                           usage='%(prog)s <subject> <query> [options]')
+    db_free_parser.add_argument('subject', help="filepath to fasta that will be used as the subject", type=str)
+    db_free_parser.add_argument('query', help="filepath to fasta that will be used as the query", type=str)
+    db_free_parser.add_argument("-r", "--runshort", action='store_true', help='runs BLASTn-short in addition to BLASTn')
+    db_free_parser.add_argument("--shortonly", action='store_true', help='only runs BLASTn-short')
+    db_free_parser.add_argument("--blaste", default=dv.BLASTN_EVAL, type=str,
+                                help='e-value for the BLASTn [default: %s]' % dv.BLASTN_EVAL, nargs='?')
+    db_free_parser.add_argument("--shorte", default=dv.BLASTN_SHORT_EVAL, type=str,
+                                help='e-value for the BLASTn-short [default: %s]' % dv.BLASTN_SHORT_EVAL, nargs='?')
+    db_free_parser.add_argument("-t", "--notigcov", action='store_true', help="remove hits that cover the entire tig")
+    db_free_parser.add_argument("--makedb", action='store_true', help=argparse.SUPPRESS)
+    db_free_parser.add_argument("--outfmt_six", action='store_true', help=argparse.SUPPRESS)
+    # above argument needed for run_blast to use the '-db' flag. dummy option that users won't see
+
+    # -------------------------------------------------------------- #
+    # OUTFILE PARSER: run FACET on a pre-generated BLAST output file #
+    # -------------------------------------------------------------- #
+    outfile_parser = subparsers.add_parser('outfile',
+                                           parents=[cleaner_parent],
+                                           description='',
+                                           epilog='Example: %s outfile <blast.out> <subject.fasta> <query.fasta> '
+                                                  '[options]' % dv.PROG_NAME,
+                                           usage='%(prog)s <blast_outfile> <subject> <query> [options]')
+    outfile_parser.add_argument('blast_outfile', help="filepath to BLAST output that the program will operate on",
+                                type=str)
+    outfile_parser.add_argument("subject", default="", type=str, help="filepath to the fasta file that was used as a"
+                                                                      " subejct for the blast outfile")
+    outfile_parser.add_argument("query", default="", type=str, help="filepath to the fasta file that was used as a"
+                                                                    " query for the blast outfile")
+    outfile_parser.add_argument("--eval_filter", default="1e30", type=str,
+                                help='Only consider alignments with an evalue <= the value provided.', nargs='?')
+    outfile_parser.add_argument("--outfmt_six", action='store_true', help='use if the outfile is in blast outfmt 6')
+
+    # ------------------------------------------------------------ #
+    # MASKER PARSER: Use an all-against-all BLAST to mask a genome #
+    # ------------------------------------------------------------ #
+    masker_parser = subparsers.add_parser('masker',
+                                           description='',
+                                           epilog='Example: %s masker <genome.fasta> [options]' % dv.PROG_NAME,
+                                           usage='%(prog)s <genome> [options]')
+    masker_parser.add_argument('genome', help="filepath to a genome FASTA that will be masked",
+                                type=str)
+    masker_parser.add_argument("--cov_depth", default=2, type=int,
+                                help='Coverage depth needed to be considered repetitive; in the context of a self-blast,'
+                                     ' coverage of 1 is unique because the contig will always align to itself; 2 <= cov_depth <= 44'
+                                     ' [default: 2]', nargs='?')
+    masker_parser.add_argument("--mask_char", default="n",
+                               help="character that masked bases will be replaced with [default: n]", nargs='?')
+    masker_parser.add_argument("--blaste", default=dv.BLASTN_EVAL, type=str,
+                               help='e-value for the BLASTn [default: %s]' % dv.BLASTN_EVAL, nargs='?')
+    masker_parser.add_argument("--num_threads", default=2, type=int,
+                               help="speeds up BLAST if your computer has multiple cores [default: 2]", nargs='?')
+    masker_parser.add_argument("--force", action='store_true',
+                                help="forces the overwrite of existing data files")
+    masker_parser.add_argument("-v", "--verbose", action='store_true', help="prints a lot more information")
+
+
+    # ------------------------------ #
+    # parse the inputs from the user #
+    # ------------------------------ #
+    args = top_parser.parse_args()
+
+    # --------------------------------------------------------------- #
+    # Run the program using the information from the argument parsers #
+    # --------------------------------------------------------------- #
+    try:
+        ProgParser().interpret_parser(args)
+    except SystemExit:
+        print("\n%s exited due to a recognized fatal error" % dv.PROG_NAME)
+    except Exception:
+        print("\n%s exited due to an unexpected error: %s" % (dv.PROG_NAME, sys.exc_info()[0]))
+        raise
