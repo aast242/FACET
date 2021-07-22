@@ -9,17 +9,19 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
+from .defaults import ProgDefaults as dv
+
 
 # using the qseq id's and sequences, makes a dictionary that will be used to analyze changes to seq in hits #
 def make_rip_dict(query_info: list):
-    ripDict = {}
+    rip_dict = {}
     for query in query_info:
-        tempPos = {}
+        temp_pos = {}
         for pos in range(0, len(query[1])):
-            tempPos[str(pos)] = {"A": 0, "G": 0, "T": 0, "C": 0, "-": 0, "match_ref": [0], "ins": [], "N": 0}
-        tempPos["el_seq"] = query[1]
-        ripDict[query[0]] = tempPos
-    return ripDict
+            temp_pos[str(pos)] = {"A": 0, "G": 0, "T": 0, "C": 0, "-": 0, "match_ref": [0], "ins": [], "N": 0}
+        temp_pos["el_seq"] = query[1]
+        rip_dict[query[0]] = temp_pos
+    return rip_dict
 
 
 # takes a btop string and returns an easily readable list #
@@ -256,3 +258,14 @@ def reverse_compliment(btop: str):
         if not isinstance(btop[element], int):
             btop[element] = str(Seq(btop[element]).complement())
     return "".join(str(x) for x in btop)
+
+
+# compare a reference base with an alternative base and return if it matches a possible RIP mutation
+def check_if_ripd(ref_base, alt_base):
+    ripq = False
+    try:
+        if alt_base.upper() == dv.RIP_MUT[ref_base.upper()]:
+            ripq = True
+    except KeyError:
+        pass
+    return ripq

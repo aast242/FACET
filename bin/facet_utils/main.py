@@ -5,12 +5,13 @@ __author__ = "Alex Stewart"
 
 import os
 from pathlib import Path
+from shutil import rmtree
 
 from . import blast_utils
 from . import masker_utils
 from .defaults import ProgDefaults as dv
 from . import file_export
-from . import init_config
+from . import variant_utils
 
 
 class ProgParser:
@@ -18,15 +19,13 @@ class ProgParser:
         pass
 
     def database_run(self, args):
-        if args.blaste is None or args.shorte is None or args.buffer is None or args.writefasta is None or \
+        if args.blaste is None or args.buffer is None or args.writefasta is None or \
                 args.num_threads is None:
             print("FATAL: Option specified with no value")
             exit()
 
-        # initialize configuration for database and output directory names
-        config = init_config.validate_config_load(init_config.get_config())
-        user_db_name = config["db_name"]
-        outdir_name = config["outdir_name"]
+        user_db_name = dv.USER_DB_NAME
+        outdir_name = dv.OUTDIR_NAME
 
         # set up names for subject and query #
         contigs = args.subject
@@ -50,12 +49,8 @@ class ProgParser:
                 print("\nDirectory \'" + datafilepath + '\' already exists; using it')
 
         # sets up a filepath for file export #
-        if args.shortonly:
-            filepath = contigsFilename + "_" + queryFilename + "_shortonly"
-        elif args.runshort:
-            filepath = contigsFilename + "_" + queryFilename + "_short"
-        else:
-            filepath = contigsFilename + "_" + queryFilename
+        filepath = contigsFilename + "_" + queryFilename + "_" + args.task
+
         if args.notigcov:
             filepath += "_ntc"
         if args.noclean:
@@ -70,36 +65,19 @@ class ProgParser:
             print("FATAL: cowardly refusing to overwrite user files, use \'--force\' to override")
             exit()
 
-        # runs normal blast with the newly created database, cleans each list, and stores cleaned list in nested dict
-        if not args.shortonly:
-            if args.verbose:
-                print("\nRunning BLASTn....")
-            blastdata = blast_utils.blastn_driver(dbfilepath, contigs, query, args)
-        else:
-            blastdata = {}
-
-        # runs short blast with the newly created database and cleans each repeat
-        if args.runshort or args.shortonly:
-            if args.verbose:
-                print("\nRunning BLASTn-short....")
-            shortblastdata = blast_utils.short_driver(dbfilepath, contigs, query, blastdata, args)
-        else:
-            shortblastdata = {}
-
-        # combines shortblast hits with blast hits
-        combinedhits = blast_utils.cat_megablast_short(blastdata, shortblastdata, args)
+        # directory containing temporary output files #
+        aln_dir = blast_utils.blast_driver(dbfilepath, contigs, query, args)
 
         # data export #
-        file_export.data_export_driver(contigs, combinedhits, datafilepath, filepath, query, args)
+        file_export.data_export_driver_new(contigs, aln_dir, datafilepath, filepath, query, args)
 
     def db_free_run(self, args):
-        if args.blaste is None or args.shorte is None or args.buffer is None or args.writefasta is None:
+        if args.blaste is None or args.buffer is None or args.writefasta is None:
             print("FATAL: Option specified with no value")
             exit()
 
         # initialize configuration for database and output directory names
-        config = init_config.validate_config_load(init_config.get_config())
-        outdir_name = config["outdir_name"]
+        outdir_name = dv.OUTDIR_NAME
 
         # set up names for subject and query #
         contigs = args.subject
@@ -121,12 +99,7 @@ class ProgParser:
                 print("\nDirectory \'" + datafilepath + '\' already exists; using it')
 
         # sets up a filepath for file export #
-        if args.shortonly:
-            filepath = contigsFilename + "_" + queryFilename + "_shortonly"
-        elif args.runshort:
-            filepath = contigsFilename + "_" + queryFilename + "_short"
-        else:
-            filepath = contigsFilename + "_" + queryFilename
+        filepath = contigsFilename + "_" + queryFilename + "_" + args.task
         if args.notigcov:
             filepath += "_ntc"
         if args.noclean:
@@ -141,39 +114,22 @@ class ProgParser:
             print("FATAL: cowardly refusing to overwrite user files, use \'--force\' to override")
             exit()
 
-        # runs normal blast with the newly created database, cleans each list, and stores cleaned list in nested dict
-        if not args.shortonly:
-            if args.verbose:
-                print("\nRunning BLASTn....")
-            blastdata = blast_utils.blastn_driver(dbfilepath, contigs, query, args)
-        else:
-            blastdata = {}
-
-        # runs short blast with the newly created database and cleans each repeat
-        if args.runshort or args.shortonly:
-            if args.verbose:
-                print("\nRunning BLASTn-short....")
-            shortblastdata = blast_utils.short_driver(dbfilepath, contigs, query, blastdata, args)
-        else:
-            shortblastdata = {}
-
-        # combines shortblast hits with blast hits
-        combinedhits = blast_utils.cat_megablast_short(blastdata, shortblastdata, args)
+        # directory containing temporary output files #
+        aln_dir = blast_utils.blast_driver(dbfilepath, contigs, query, args)
 
         # data export #
-        file_export.data_export_driver(contigs, combinedhits, datafilepath, filepath, query, args)
+        file_export.data_export_driver_new(contigs, aln_dir, datafilepath, filepath, query, args)
 
     def outfile_run(self, args):
-        if args.buffer is None or args.eval_filter is None or args.writefasta is None:
+        if args.buffer is None or args.blaste is None or args.writefasta is None:
             # print(args.buffer, args.eval_filter, args.writefasta)
             print("FATAL: Option specified with no value")
             exit()
 
         # initialize configuration for database and output directory names
-        config = init_config.validate_config_load(init_config.get_config())
-        outdir_name = config["outdir_name"]
+        outdir_name = dv.OUTDIR_NAME
 
-        outfile = list(filter(None, [i.rstrip() for i in open(args.blast_outfile, 'r').readlines()]))
+        outfile = Path(args.blast_outfile).resolve()
         outfile_name = str(Path(Path(args.blast_outfile).resolve().name).with_suffix(''))
 
         contigs = args.subject
@@ -205,7 +161,7 @@ class ProgParser:
         outfile = blast_utils.infile_driver(outfile, args)
 
         # data export #
-        file_export.data_export_driver(contigs, outfile, datafilepath, filepath, query, args)
+        file_export.data_export_driver_new(contigs, outfile, datafilepath, filepath, query, args)
 
     def masker_run(self, args):
         if args.cov_depth is None or args.mask_char is None or args.blaste is None or args.num_threads is None:
@@ -214,26 +170,98 @@ class ProgParser:
         if Path("%s_%smasked.fasta" % (Path(args.genome).stem, dv.PROG_NAME.lower())).exists() and not args.force:
             print("FATAL: cowardly refusing to overwrite user files, use \'--force\' to override")
             exit()
-        # masker_utils.masker_str_driver(args) # DO NOT USE STRINGS IN PYTHON, LISTS ARE MUCH MUCH MUCH MORE EFFICIENT
-        masker_utils.masker_list_driver(args)
+        elif Path("%s_%smasked.fasta" % (Path(args.genome).stem, dv.PROG_NAME.lower())).exists() and args.force:
+            os.remove(Path("%s_%smasked.fasta" % (Path(args.genome).stem, dv.PROG_NAME.lower())))
+
+        user_db_name = dv.USER_DB_NAME
+
+        facet_prog_dir = str(Path(__file__).parent.absolute().resolve())
+
+        # creates a BLAST database #
+        if args.verbose:
+            print("\nCreating a BLAST database....")
+        dbfilepath = blast_utils.make_blast_db(user_db_name, Path(args.genome).resolve(), facet_prog_dir, args)
+
+        masker_utils.masker_driver(blast_utils.blast_driver(dbfilepath, args.genome, args.genome, args), args)
+
+    def vc_run(self, args):
+        if args.genome == "" and args.outfile == "":
+            print("FATAL: please provide a genome file or a self-blast outfile using \'--genome <genome.fasta>\' or "
+                  "\'--outfile <file.out>\'")
+            exit()
+
+        # Checks file overwrites
+        if args.verbose:
+            print("Checking to see if %s will overwrite files...." % dv.PROG_NAME)
+        variant_utils.check_vc_overwrite(args)
+
+        # initialize configuration for database and output directory names
+        user_db_name = dv.USER_DB_NAME
+        facet_prog_dir = str(Path(__file__).parent.absolute().resolve())
+
+        try:
+            os.makedirs(dv.OUTDIR_NAME)
+        except FileExistsError:
+            if args.verbose:
+                print("\nDirectory \'" + dv.OUTDIR_NAME + '\' already exists; using it')
+
+        # the user has provided an outfile and has also provided a genome used to generate the outfile
+        if args.outfile != "":
+            blast_utils.infile_driver(Path(args.outfile).resolve(), args)
+
+        # the user has not provided an outfile, but has provided a genome that can be used to perform a self-blast
+        else:
+            # creates a BLAST database #
+            if args.verbose:
+                print("\nCreating a BLAST database....")
+            dbfilepath = blast_utils.make_blast_db(user_db_name, args.genome, facet_prog_dir, args)
+
+            # runs blast on created database
+            blast_utils.blast_driver(dbfilepath, args.genome, args.genome, args)
+
+        variant_utils.vc_driver(args)
 
     def interpret_parser(self, args):
+        try:
+            os.mkdir(dv.PROG_TEMP_DIR)
+        except FileExistsError:
+            print("FATAL: temp directory already exists! How did this even happen!?")
+            exit()
+        except Exception:
+            print("FATAL: Something went wrong with creating the temp directory.")
+            print("Make sure you have permission to create directories in the current working directory!")
+            exit()
+
         if args.verbose:
             print('.:| ' + dv.PROG_NAME + ' ' + dv.PROG_VERSION + ' |:.''')
 
-        if args.subparser_id == "database" or args.subparser_id == "db":
+        # creates outfmt dictionary and sets args.outfmt to the dict
+        blast_utils.outfmt_parser(args)
+
+        if args.subparser_id in dv.DB_ALIAS:
             if args.verbose:
                 print("Running %s by creating a BLAST database....\n" % dv.PROG_NAME)
             self.database_run(args)
-        elif args.subparser_id == 'db_free' or args.subparser_id == 'database_free' or args.subparser_id == 'dbf':
+        elif args.subparser_id in dv.FREE_ALIAS:
             if args.verbose:
                 print("Running %s without creating a BLAST database....\n" % dv.PROG_NAME)
             self.db_free_run(args)
-        elif args.subparser_id == 'outfile':
+        elif args.subparser_id in dv.OUTFILE_ALIAS:
             if args.verbose:
                 print("Running %s on a BLAST output file....\n" % dv.PROG_NAME)
             self.outfile_run(args)
-        elif args.subparser_id == 'masker':
+        elif args.subparser_id in dv.MASKER_ALIAS:
             if args.verbose:
                 print("Using %s to mask repetitive regions in the provided genome....\n" % dv.PROG_NAME)
             self.masker_run(args)
+        elif args.subparser_id in dv.VC_ALIAS:
+            if args.verbose:
+                print("Using %s to find SNP calls in repetitive regions of the provided genome....\n" % dv.PROG_NAME)
+            self.vc_run(args)
+        try:
+            if args.verbose:
+                print("\nRemoving temp directory....")
+                rmtree(dv.PROG_TEMP_DIR)
+                print("Successfully removed temp directory!")
+        except Exception:
+            print("Temp directory \'%s\' was not successfully removed." % dv.PROG_TEMP_DIR)
