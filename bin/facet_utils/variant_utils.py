@@ -57,9 +57,7 @@ def vc_driver(args):
     false_snp = []
     cycle_count = 0
     for of in blast_outfiles:
-        print(of)
         curr_tigid = Path(of).name.split("_%stemp." % dv.PROG_NAME)[-1]
-        print(curr_tigid)
 
         if args.verbose:
             print("\nDetermining which %s SNPs are called in repetitive regions...." % curr_tigid)
@@ -83,7 +81,6 @@ def vc_driver(args):
                 cycle_count += 1
                 line = line.rstrip().split("\t")
                 line[dv.VCF_FMT_DICT["pos"]] = int(line[dv.VCF_FMT_DICT["pos"]])
-                print(line[dv.VCF_FMT_DICT["pos"]])
                 # if the region is considered repetitive, add the variant to the false_snp list
                 if curr_lst[line[dv.VCF_FMT_DICT["pos"]] - 1] >= args.cov_depth:
                     false_snp.append(line)
@@ -319,7 +316,6 @@ def gen_cov_lst(selfblast_outfile, genome_indx, args):
 
     chr_name = Path(selfblast_outfile).name.split("_%stemp." % dv.PROG_NAME)[-1]
     chr_len = len(genome_indx[chr_name])
-    print(chr_len)
     chr_lst = [0] * chr_len
     with open(Path(selfblast_outfile).resolve(), 'r') as curr_file:
         while True:
