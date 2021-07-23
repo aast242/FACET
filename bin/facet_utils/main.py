@@ -167,6 +167,9 @@ class ProgParser:
         if args.cov_depth is None or args.mask_char is None or args.blaste is None or args.num_threads is None:
             print("FATAL: Option specified with no value")
             exit()
+        if len(args.mask_char) > 1:
+            print("FATAL: mask_char is longer than one character!")
+            exit()
         if Path("%s_%smasked.fasta" % (Path(args.genome).stem, dv.PROG_NAME.lower())).exists() and not args.force:
             print("FATAL: cowardly refusing to overwrite user files, use \'--force\' to override")
             exit()
