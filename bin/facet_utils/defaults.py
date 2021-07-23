@@ -15,7 +15,7 @@ class ProgDefaults:
 
     # common filenames and default values #
     PROG_NAME = "FACET"
-    PROG_VERSION = "v0.1.5"
+    PROG_VERSION = "v0.1.6"
 
     # parser aliases
     DB_ALIAS = ['database', 'db']
