@@ -5,6 +5,7 @@ __author__ = "Alex Stewart"
 
 import csv
 import os
+import time
 from sys import exc_info
 from pathlib import Path
 from shutil import copyfileobj
@@ -21,25 +22,33 @@ def vc_driver(args):
     final_vc_outdir = "%s/%s_%s_VCF" % (dv.OUTDIR_NAME, Path(args.genome).stem.replace(".", "_"),
                                         Path(args.vcf_file).stem.replace(".", "_"))
 
-    true_snps_fp = "%s/%s_%s_%s" % (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
-                                    Path(args.vcf_file).stem.replace(".", "_"), dv.VCF_TRUE_SNP_FILE)
-    false_snps_fp = "%s/%s_%s_%s"% (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
-                                     Path(args.vcf_file).stem.replace(".", "_"), dv.VCF_FALSE_SNP_FILE)
-    summary_file_fp = "%s/%s_%s_%s" % (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
-                                       Path(args.vcf_file).stem.replace(".", "_"), dv.VCF_SUMM_FILE)
-    final_rplot_fp = "%s/%s_%s_%s" % (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
-                                      Path(args.vcf_file).stem.replace(".", "_"), dv.RPLOT_FINAL_OUT)
     # get the vc driver to where the tempdir is filled with BLAST outfiles and get an os.listdir at that point
     # so that you have the outfiles to iterate through saved and can safely output the vcf_header and variants.vcf files
+    if args.verbose:
+        print("Indexing %s...." % Path(args.genome).name)
     genome_indx = SeqIO.index(args.genome, 'fasta')
 
     # gets organised BLAST hits that have not been cleaned
     blast_outfiles = ["%s/%s" % (dv.PROG_TEMP_DIR, i) for i in os.listdir(dv.PROG_TEMP_DIR)]
 
+    # goes through each ID in the genome and checks to see if there is a corresponding BLAST outfile
+    for i in genome_indx:
+        empty_fp = "%s/%s_%s_%s_master_%s_%s_%stemp.%s" % (dv.PROG_TEMP_DIR, Path(args.genome).stem,
+                                                           Path(args.genome).stem, dv.TIME_STR,
+                                                           i.replace(".", ""), dv.TIME_STR,
+                                                           dv.PROG_NAME, i)
+        # if the file doesn't exist, create an empty one so we know it COULD have existed
+        if Path(empty_fp).exists() is False:
+            open(empty_fp, 'w').close()
+
     # get VCF file that contains only SNPs
     if args.verbose:
-        print("\nParsing VCF file to find bases with SNP calls....")
+        print("\nParsing \'%s\' to find positions with variant calls...." % Path(args.vcf_file).name)
     flush_vcf_file(Path(args.vcf_file).resolve())
+
+    if Path(dv.VCF_VARIANT_TEMPFILE).exists() is False:
+        print("FATAL: FACET could not identify any positions with variant calls in \'%s\'" % Path(args.vcf_file).name)
+        exit()
 
     # split SNP_only vcf up into contigs
     try:
@@ -52,83 +61,18 @@ def vc_driver(args):
     flush_var_to_tigs(dv.VCF_VARIANT_TEMPFILE, dv.VCF_TEMPDIR, dv.VCF_FMT_DICT["chrom"])
 
     true_cnt = 0
-    true_snp = []
     false_cnt = 0
-    false_snp = []
-    cycle_count = 0
-    for of in blast_outfiles:
-        curr_tigid = Path(of).name.split("_%stemp." % dv.PROG_NAME)[-1]
 
-        if args.verbose:
-            print("\nDetermining which %s SNPs are called in repetitive regions...." % curr_tigid)
-        curr_vcf = "%s/%s.vcf" % (dv.VCF_TEMPDIR, curr_tigid)
-        if not Path(curr_vcf).resolve().exists():
-            if args.verbose:
-                print("\'%s\' does not exist! Skipping..." % curr_vcf)
-            continue
-        curr_lst = gen_cov_lst(of, genome_indx, args)
-        # ^ might seem like a lot to load cov_list into memory, but the largest human chromosome only took ~2gb of mem
+    #
+    for var_files in ["%s/%s" % (dv.VCF_TEMPDIR, i) for i in os.listdir(dv.VCF_TEMPDIR)]:
+        temp_true_cnt, temp_false_cnt = get_var_status(var_files, blast_outfiles, genome_indx, args)
+        true_cnt += temp_true_cnt
+        false_cnt += temp_false_cnt
 
-        # IF YOU ARE GENERATING AN RPLOT
-        if args.rplot:
-            write_rplot_file(curr_vcf, curr_lst, curr_tigid, args)
-
-        with open(curr_vcf, 'r') as f:
-            while True:
-                line = f.readline()
-                if not line:
-                    break
-                cycle_count += 1
-                line = line.rstrip().split("\t")
-                line[dv.VCF_FMT_DICT["pos"]] = int(line[dv.VCF_FMT_DICT["pos"]])
-                # if the region is considered repetitive, add the variant to the false_snp list
-                if curr_lst[line[dv.VCF_FMT_DICT["pos"]] - 1] >= args.cov_depth:
-                    false_snp.append(line)
-                    false_cnt += 1
-                # if the region is not considered repetitive, add variant to true_snp list
-                else:
-                    true_snp.append(line)
-                    true_cnt += 1
-
-                # if the cycle count is bigger than the flush length, flush variants to files
-                if cycle_count >= dv.FLUSH_LEN:
-                    if false_snp:
-                        with open("%s/false_snp.vcf" % dv.VCF_TEMPDIR, 'a', newline='') as csvfile:
-                            filewriter = csv.writer(csvfile, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
-                                                    lineterminator="\n")
-                            for records in false_snp:
-                                filewriter.writerow(records)
-                        false_snp = []
-                    if true_snp:
-                        with open("%s/true_snp.vcf" % dv.VCF_TEMPDIR, 'a', newline='') as csvfile:
-                            filewriter = csv.writer(csvfile, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
-                                                    lineterminator="\n")
-                            for records in true_snp:
-                                filewriter.writerow(records)
-                        true_snp = []
-                    cycle_count = 0
-
-        # clear curr_list each iteration to preserve memory
-        del curr_lst
-
-    # dump alns at the end if cycle count is greater than zero
-    if cycle_count > 0:
-        if false_snp:
-            with open("%s/false_snp.vcf" % dv.VCF_TEMPDIR, 'a', newline='') as csvfile:
-                filewriter = csv.writer(csvfile, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
-                                        lineterminator="\n")
-                for records in false_snp:
-                    filewriter.writerow(records)
-            del false_snp
-        if true_snp:
-            with open("%s/true_snp.vcf" % dv.VCF_TEMPDIR, 'a', newline='') as csvfile:
-                filewriter = csv.writer(csvfile, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
-                                        lineterminator="\n")
-                for records in true_snp:
-                    filewriter.writerow(records)
-            del true_snp
-
-    total_cnt = false_cnt + true_cnt
+    # this can happen if none of the IDs in the
+    if false_cnt + true_cnt == 0:
+        print("FATAL: No SNPs were identified. Please ensure the VCF file has the same sequence IDs as the FASTA file.")
+        exit()
 
     try:
         os.mkdir(final_vc_outdir)
@@ -138,58 +82,7 @@ def vc_driver(args):
         print("Problem creating final VCF output directory! Exiting....")
         raise
 
-    # write summary file
-    with open(summary_file_fp, 'w') as f:
-        if args.verbose:
-            print("\n~~~~~~~~~~~~~~~~~~")
-            print("# of total SNPs: %s" % total_cnt)
-            print("# of SNPs in repetitive regions (coverage >= %s): %s (%s/%s, %s%%)" %
-                  (args.cov_depth, false_cnt, false_cnt, total_cnt, "{:.2f}".format(float(false_cnt / total_cnt) * 100))
-                  )
-            print("# of SNPs in non-repetitive regions (coverage < %s): %s (%s/%s, %s%%)" %
-                  (args.cov_depth, true_cnt, true_cnt, total_cnt, "{:.2f}".format(float(true_cnt / total_cnt) * 100))
-                  )
-            print("~~~~~~~~~~~~~~~~~~")
-        f.write("Genome file: %s" % Path(args.genome).resolve())
-        f.write('\n')
-        f.write("Initial VCF file: %s" % Path(args.vcf_file).resolve())
-        f.write('\n')
-        f.write("# of total SNPs: %s" % total_cnt)
-        f.write('\n')
-        f.write("# of SNPs in repetitive regions (coverage >= %s): %s (%s/%s, %s%%)" %
-                (args.cov_depth, false_cnt, false_cnt, total_cnt, "{:.2f}".format(float(false_cnt / total_cnt) * 100))
-                )
-        f.write('\n')
-        f.write("# of SNPs in non-repetitive regions (coverage < %s): %s (%s/%s, %s%%)" %
-                (args.cov_depth, true_cnt, true_cnt, total_cnt, "{:.2f}".format(float(true_cnt / total_cnt) * 100))
-                )
-        f.write('\n')
-
-    # glob header and false SNPs together into master_false
-    if args.verbose:
-        print("\nWriting SNPs in repetitive regions to \'%s\'...." % false_snps_fp)
-    with open(false_snps_fp, 'wb') as tmp:
-        with open(dv.VCF_HEADER_TEMPFILE, 'rb') as of:
-            copyfileobj(of, tmp)
-        with open("%s/false_snp.vcf" % dv.VCF_TEMPDIR, 'rb') as of:
-            copyfileobj(of, tmp)
-
-    # glob header and true SNPs together into master_true
-    if args.verbose:
-        print("Writing SNPs in non-repetitive regions to \'%s\'...." % true_snps_fp)
-    with open(true_snps_fp, 'wb') as tmp:
-        with open(dv.VCF_HEADER_TEMPFILE, 'rb') as of:
-            copyfileobj(of, tmp)
-        with open("%s/true_snp.vcf" % dv.VCF_TEMPDIR, 'rb') as of:
-            copyfileobj(of, tmp)
-
-    # copy over RPLOT file
-    if args.rplot:
-        if args.verbose:
-            print("Copying temp rplot file to \'%s\'...." % final_rplot_fp)
-        with open(final_rplot_fp, 'wb') as tmp:
-            with open(dv.RPLOT_TEMP_FILE, 'rb') as rpt:
-                copyfileobj(rpt, tmp)
+    write_vc_files(false_cnt, true_cnt, args)
 
 
 # parses a vcf file and dumps 2 files to tempdir: vcf_header, variants.vcf
@@ -227,7 +120,7 @@ def flush_vcf_file(vcf_filepath):
                         filewriter = csv.writer(csvfile, delimiter='\t', escapechar='', quotechar='',
                                                 quoting=csv.QUOTE_NONE, lineterminator="\n")
                         for records in header:
-                                filewriter.writerow(records)
+                            filewriter.writerow(records)
 
                     header = []
 
@@ -243,7 +136,7 @@ def flush_vcf_file(vcf_filepath):
     if cycle_count > 0:
         if header:  # if the header is not empty, flush to file
             with open(dv.VCF_HEADER_TEMPFILE, 'a', newline='') as csvfile:
-                filewriter = csv.writer(csvfile, delimiter='\t',escapechar='', quotechar='', quoting=csv.QUOTE_NONE,
+                filewriter = csv.writer(csvfile, delimiter='\t', escapechar='', quotechar='', quoting=csv.QUOTE_NONE,
                                         lineterminator="\n")
                 for records in header:
                     filewriter.writerow(records)
@@ -503,14 +396,14 @@ def check_vc_overwrite(args):
 
     true_snps = "%s/%s_%s_%s" % (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
                                  Path(args.vcf_file).stem.replace(".", "_"), dv.VCF_TRUE_SNP_FILE)
-    false_snps = "%s/%s_%s_%s"% (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
+    false_snps = "%s/%s_%s_%s" % (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
                                   Path(args.vcf_file).stem.replace(".", "_"), dv.VCF_FALSE_SNP_FILE)
     summary_file = "%s/%s_%s_%s" % (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
                                     Path(args.vcf_file).stem.replace(".", "_"), dv.VCF_SUMM_FILE)
     if args.rplot:
 
-        final_rplot = "%s/%s_%s_%s" %  (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
-                                        Path(args.vcf_file).stem.replace(".", "_"), dv.RPLOT_FINAL_OUT)
+        final_rplot = "%s/%s_%s_%s" % (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
+                                       Path(args.vcf_file).stem.replace(".", "_"), dv.RPLOT_FINAL_OUT)
 
         if Path(final_rplot).exists() and args.force is False:
             print("FATAL: \'%s\' already exists! use --force to proceed" % final_rplot)
@@ -535,3 +428,221 @@ def check_vc_overwrite(args):
         exit()
     elif Path(summary_file).exists() and args.force is True:
         os.remove(summary_file)
+
+
+def write_vc_files(false_cnt, true_cnt, args):
+    total_cnt = false_cnt + true_cnt
+
+    final_vc_outdir = "%s/%s_%s_VCF" % (dv.OUTDIR_NAME, Path(args.genome).stem.replace(".", "_"),
+                                        Path(args.vcf_file).stem.replace(".", "_"))
+
+    true_snps_fp = "%s/%s_%s_%s" % (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
+                                    Path(args.vcf_file).stem.replace(".", "_"), dv.VCF_TRUE_SNP_FILE)
+    false_snps_fp = "%s/%s_%s_%s" % (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
+                                     Path(args.vcf_file).stem.replace(".", "_"), dv.VCF_FALSE_SNP_FILE)
+    summary_file_fp = "%s/%s_%s_%s" % (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
+                                       Path(args.vcf_file).stem.replace(".", "_"), dv.VCF_SUMM_FILE)
+    final_rplot_fp = "%s/%s_%s_%s" % (final_vc_outdir, Path(args.genome).stem.replace(".", "_"),
+                                      Path(args.vcf_file).stem.replace(".", "_"), dv.RPLOT_FINAL_OUT)
+    false_transitions = []
+    true_transitions = []
+
+    # if the path to false snps doesn't exist, don't try to glob things together
+    if Path("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_FALSE_SNP_FILE)).exists() is False:
+        print("No variants called in repetitive regions!")
+    # else, glob header and false SNPs together into master_false
+    else:
+        if args.verbose:
+            print("Getting fraction of G:C <-> A:T mutations in SNPs called in repetitive regions....")
+        false_transitions = get_transition_muts("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_FALSE_SNP_FILE))
+        if args.verbose:
+            print("\nWriting variants in repetitive regions to \'%s\'...." % false_snps_fp)
+        with open(false_snps_fp, 'wb') as tmp:
+            with open(dv.VCF_HEADER_TEMPFILE, 'rb') as of:
+                copyfileobj(of, tmp)
+            with open("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_FALSE_SNP_FILE), 'rb') as of:
+                copyfileobj(of, tmp)
+
+    # if the path to true snps doesn't exist, don't try to glob things together
+    if Path("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_TRUE_SNP_FILE)).exists() is False:
+        print("No variants called in non-repetitive regions!")
+    # else, glob header and true SNPs together into master_true
+    else:
+        if args.verbose:
+            print("Getting fraction of G:C <-> A:T mutations in SNPs called in unique regions....")
+        true_transitions = get_transition_muts("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_TRUE_SNP_FILE))
+        if args.verbose:
+            print("Writing variants in non-repetitive regions to \'%s\'...." % true_snps_fp)
+        with open(true_snps_fp, 'wb') as tmp:
+            with open(dv.VCF_HEADER_TEMPFILE, 'rb') as of:
+                copyfileobj(of, tmp)
+            with open("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_TRUE_SNP_FILE), 'rb') as of:
+                copyfileobj(of, tmp)
+
+    # copy over RPLOT file
+    if args.rplot:
+        if args.verbose:
+            print("Copying temp rplot file to \'%s\'...." % final_rplot_fp)
+        with open(final_rplot_fp, 'wb') as tmp:
+            with open(dv.RPLOT_TEMP_FILE, 'rb') as rpt:
+                copyfileobj(rpt, tmp)
+
+    # write summary file
+    with open(summary_file_fp, 'w') as f:
+        # print summary info to stdout if verbose is true
+        if args.verbose:
+            print("\n~~~~~~~~~~~~~~~~~~")
+            print("# of total variants: %s\n" % total_cnt)
+            print("# of variants in repetitive regions (coverage >= %s): %s (%s/%s, %s%%)" %
+                  (args.cov_depth, false_cnt, false_cnt, total_cnt,
+                   "{:.2f}".format(float(false_cnt / total_cnt) * 100))
+                  )
+            print("Fraction of transition mutations in repetitive regions (G:C <-> A:T / total SNPs): %s/%s (%s%%)\n" %
+                  (false_transitions[0], sum(false_transitions),
+                   "{:.2f}".format(float(false_transitions[0] / sum(false_transitions)) * 100))
+                  )
+            print("# of variants in unique regions (coverage < %s): %s (%s/%s, %s%%)" %
+                  (
+                      args.cov_depth, true_cnt, true_cnt, total_cnt, "{:.2f}".format(float(true_cnt / total_cnt) * 100))
+                  )
+            print("Fraction of transition mutations in unique regions (G:C <-> A:T / total SNPs): %s/%s (%s%%)" %
+                  (true_transitions[0], sum(true_transitions),
+                   "{:.2f}".format(float(true_transitions[0] / sum(true_transitions)) * 100))
+                  )
+            print("~~~~~~~~~~~~~~~~~~")
+
+        # write summary information to file
+        f.write("Genome file: %s" % Path(args.genome).resolve())
+        f.write('\n')
+        f.write("Initial VCF file: %s" % Path(args.vcf_file).resolve())
+        f.write('\n')
+        f.write("# of total variants: %s" % total_cnt)
+        f.write('\n')
+        f.write("# of variants in repetitive regions (coverage >= %s): %s (%s/%s, %s%%)" %
+                (args.cov_depth, false_cnt, false_cnt, total_cnt,
+                 "{:.2f}".format(float(false_cnt / total_cnt) * 100))
+                )
+        f.write('\n')
+        f.write("Fraction of transition mutations in repetitive regions (G:C <-> A:T / total SNPs): %s/%s (%s%%)" %
+                (false_transitions[0], sum(false_transitions),
+                 "{:.2f}".format(float(false_transitions[0] / sum(false_transitions)) * 100)))
+        f.write('\n')
+        f.write("Fraction of transition mutations in unique regions (G:C <-> A:T / total SNPs): %s/%s (%s%%)" %
+                (true_transitions[0], sum(true_transitions),
+                 "{:.2f}".format(float(true_transitions[0] / sum(true_transitions)) * 100))
+                )
+        f.write('\n')
+        f.write("# of variants in non-repetitive regions (coverage < %s): %s (%s/%s, %s%%)" %
+                (args.cov_depth, true_cnt, true_cnt, total_cnt, "{:.2f}".format(float(true_cnt / total_cnt) * 100))
+                )
+        f.write('\n')
+
+
+def get_var_status(vcf_varfile, blast_outfile_lst, genome_indx, args):
+    false_cnt = 0
+    true_cnt = 0
+
+    # finds the blast outfile that corresponds with the vcf id
+    blast_outfile = ""
+    vcf_id = Path(vcf_varfile).with_suffix("").name
+    for filepath in blast_outfile_lst:
+        if Path(filepath).name.split("_%stemp." % dv.PROG_NAME)[-1] == vcf_id:
+            blast_outfile = filepath
+            break
+    # if a corresponding BLAST file was not found, exit the program
+    if blast_outfile == "":
+        print("FATAL: No corresponding BLAST outfile for \'%s\' in VCF. Please ensure this VCF was created"
+              " using this genome." % vcf_id)
+        exit()
+
+    # if a corresponding BLAST file is found, but is empty (indicating that FACET created the file),
+    # put all of the VCF variants into the true SNP file
+    elif os.path.getsize(blast_outfile) == 0:
+        if args.verbose:
+            print("No BLAST alignments in %s outfile\n All %s variants are in a unique region!" %
+                  (vcf_id, vcf_id))
+        with open("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_TRUE_SNP_FILE), 'a') as tmp:
+            with open(vcf_varfile, 'rb') as of:
+                copyfileobj(of, tmp)
+
+    else:
+        true_snp = []
+        false_snp = []
+        cycle_count = 0
+
+        curr_lst = gen_cov_lst(blast_outfile, genome_indx, args)
+        # ^ might seem like a lot to load cov_list into memory, but the largest human chromosome only took ~2gb of mem
+
+        # IF YOU ARE GENERATING AN RPLOT
+        if args.rplot:
+            write_rplot_file(vcf_varfile, curr_lst, vcf_id, args)
+
+        with open(vcf_varfile, 'r') as f:
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                cycle_count += 1
+                line = line.rstrip().split("\t")
+                line[dv.VCF_FMT_DICT["pos"]] = int(line[dv.VCF_FMT_DICT["pos"]])
+                # if the region is considered repetitive, add the variant to the false_snp list
+                if curr_lst[line[dv.VCF_FMT_DICT["pos"]] - 1] >= args.cov_depth:
+                    false_snp.append(line)
+                    false_cnt += 1
+                # if the region is not considered repetitive, add variant to true_snp list
+                else:
+                    true_snp.append(line)
+                    true_cnt += 1
+
+                # if the cycle count is bigger than the flush length, flush variants to files
+                if cycle_count >= dv.FLUSH_LEN:
+                    if false_snp:
+                        with open("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_FALSE_SNP_FILE), 'a', newline='') as csvfile:
+                            filewriter = csv.writer(csvfile, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
+                                                    lineterminator="\n")
+                            for records in false_snp:
+                                filewriter.writerow(records)
+                        false_snp = []
+                    if true_snp:
+                        with open("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_TRUE_SNP_FILE), 'a', newline='') as csvfile:
+                            filewriter = csv.writer(csvfile, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
+                                                    lineterminator="\n")
+                            for records in true_snp:
+                                filewriter.writerow(records)
+                        true_snp = []
+                    cycle_count = 0
+        del curr_lst
+
+        # writes hits at the end of parsing the VCF
+        if cycle_count > 0:
+            if false_snp:
+                with open("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_FALSE_SNP_FILE), 'a', newline='') as csvfile:
+                    filewriter = csv.writer(csvfile, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
+                                            lineterminator="\n")
+                    for records in false_snp:
+                        filewriter.writerow(records)
+            if true_snp:
+                with open("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_TRUE_SNP_FILE), 'a', newline='') as csvfile:
+                    filewriter = csv.writer(csvfile, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
+                                            lineterminator="\n")
+                    for records in true_snp:
+                        filewriter.writerow(records)
+    return true_cnt, false_cnt
+
+
+def get_transition_muts(varfile_nohead):
+    tv_muts = 0  # transversion mutant counts
+    ts_muts = 0  # transition mutant counts (RIP mutations)
+    with open(varfile_nohead, 'r') as vfnh:
+        while True:
+            # read each line
+            line = vfnh.readline()
+            # if the line is the last line of the file, exit the loop
+            if not line:
+                break
+            line = line.rstrip().split("\t")
+            if btop_utils.check_if_ripd(line[dv.VCF_FMT_DICT["ref"]], line[dv.VCF_FMT_DICT["alt"]]):
+                ts_muts += 1
+            else:
+                tv_muts += 1
+    return [ts_muts, tv_muts]

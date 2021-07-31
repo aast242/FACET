@@ -4,6 +4,7 @@
 __author__ = "Alex Stewart"
 
 from datetime import datetime
+from os import sched_getaffinity
 from . import init_config
 
 
@@ -15,7 +16,7 @@ class ProgDefaults:
 
     # common filenames and default values #
     PROG_NAME = "FACET"
-    PROG_VERSION = "v0.1.6"
+    PROG_VERSION = "v0.1.7"
 
     # parser aliases
     DB_ALIAS = ['database', 'db']
@@ -67,7 +68,7 @@ class ProgDefaults:
     TIC_DELTA = 5
 
     # Number of alignments needed in list before it flushes out #
-    FLUSH_LEN = 60000
+    FLUSH_LEN = 100000
 
     # String of current time to make temp folders that don't recur #
     TIME_STR = datetime.now().strftime('%Y%m%d%H%M%S')
@@ -82,8 +83,8 @@ class ProgDefaults:
     VCF_HEADER_TEMPFILE = "%s/vcf_header" % PROG_TEMP_DIR
     VCF_VARIANT_TEMPFILE = "%s/variants.vcf" % PROG_TEMP_DIR
     VCF_TEMPDIR = "%s/VCF_TEMPDIR" % PROG_TEMP_DIR
-    VCF_TRUE_SNP_FILE = "true_SNPs.vcf"
-    VCF_FALSE_SNP_FILE = "false_SNPs.vcf"
+    VCF_TRUE_SNP_FILE = "UniqueRegion_SNPs.vcf"
+    VCF_FALSE_SNP_FILE = "RepetitiveRegion_SNPs.vcf"
     VCF_SUMM_FILE = "summary.txt"
 
     # RIP MUTATIONS
@@ -99,3 +100,8 @@ class ProgDefaults:
     RPLOT_HEADERS = ["sseqid", "start_pos_of_window", "RIP:non", "VCF_coverage", "BLAST_coverage"]
     RPLOT_TEMP_FILE = "%s/RPLOT_TEMP_FILE" % PROG_TEMP_DIR
     RPLOT_FINAL_OUT = "rplot_%swin_%sstep" % (RPLOT_WINDOW_SIZE, RPLOT_WINDOW_STEP)
+
+    # Multiprocessing
+    AVAIL_CORES = len(sched_getaffinity(0))
+    if AVAIL_CORES - 2 > 0:
+        AVAIL_CORES -= 2

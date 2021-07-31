@@ -6,6 +6,7 @@ __author__ = "Alex Stewart"
 import subprocess
 import os
 import csv
+import multiprocessing as mp
 from pathlib import Path
 from shutil import copyfileobj, rmtree
 
@@ -195,43 +196,28 @@ def infile_driver(blast_infile, args):
     verify_outfmt(blast_infile, args)
 
     # flush alignments to tig files
-    flush_outfile_to_tigs(blast_infile, dv.PROG_TEMP_DIR, "sseqid", True, args)
+    if args.verbose:
+        print("\nFlushing alignments from master file based on contig ID....")
+    flush_outfile_to_tigs(blast_infile, dv.PROG_TEMP_DIR, "sseqid", True, blast_infile, args)
 
     # master becomes a list of paths to the files in the temp_dir
     master_file = ['%s/%s' % (dv.PROG_TEMP_DIR, i) for i in os.listdir(dv.PROG_TEMP_DIR)]
 
-    # TODO: add multiprocessing here
+    # Parses each tig
+    if args.verbose:
+        print("Parsing each contig file....")
+    multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
     for tmpfile in master_file:
+        # if we aren't cleaning, no need to break up by query
+        if args.noclean:
+            multi_pool.apply_async(write_blast_outfile, args=(parse_blast_outfile(tmpfile, args), tmpfile, ))
+        # if we are cleaning, break each tig up by query
+        else:
+            multi_pool.apply_async(individual_tig_parser, args=(tmpfile, args, sstart, send, pident, ))
 
-        curr_id_dir = "%s/%s_outdir" % (dv.PROG_TEMP_DIR, Path(tmpfile).stem)
-        # make a dir to store files exported based on qseqid
-        Path(curr_id_dir).mkdir(parents=True, exist_ok=True)
-
-        # flush alignments to query files and delete the master
-        flush_outfile_to_tigs(tmpfile, curr_id_dir, "qseqid", False, args)
-
-        qfiles = ['%s/%s' % (curr_id_dir, i) for i in os.listdir(curr_id_dir)]
-        # open file containing a single contig's matches with a single query
-        for qfile in qfiles:
-            grimy = parse_blast_outfile(qfile, args)
-            # if we are cleaning, clean up the grimy list; else, do no cleaning
-            if args.noclean is False:
-                # pident is set to -1 here because the larger hit should be picked, not the one with the highest pident
-                grimy = clean_list_new(grimy, sstart, send, pident, False, args)
-
-            # write the cleaned up file
-            with open(qfile, 'w') as k:
-                filewriter = csv.writer(k, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
-                                        lineterminator="\n")
-                for records in grimy:
-                    filewriter.writerow(records)
-
-        # combines all of the queryid files into an outfile for the contig
-        with open(tmpfile, 'wb') as tmp:
-            for out_file in qfiles:
-                with open(out_file, 'rb') as of:
-                    copyfileobj(of, tmp)
-        rmtree(curr_id_dir)
+    multi_pool.close()
+    multi_pool.join()
+    del multi_pool
 
     # concatenates repeat data if noclean and nocat have not been called
     if args.nocat is False and args.noclean is False:
@@ -251,12 +237,53 @@ def infile_driver(blast_infile, args):
 
     if args.verbose:
         print("\nSorting each contig's alignments by sstart....")
-    # TODO: add multiprocessing here
-    sstart_sort_outfile(dv.PROG_TEMP_DIR, args)
+
+
+    # sort each contig's alignments by sstart
+    multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
+    for outfile_name in ["%s/%s" % (dv.PROG_TEMP_DIR, i) for i in os.listdir(dv.PROG_TEMP_DIR)]:
+        multi_pool.apply_async(sstart_sort_outfile, args=(outfile_name, args,))
+
+    multi_pool.close()
+    multi_pool.join()
+    del multi_pool
+
     if args.verbose:
         print()
     # all hits are stored in dv.PROG_TEMP_DIR, just operate on that dir
     return dv.PROG_TEMP_DIR
+
+
+def individual_tig_parser(temp_tig_file, args, sstart, send, pident):
+    curr_id_dir = "%s/%s_outdir" % (dv.PROG_TEMP_DIR, Path(temp_tig_file).stem)
+    # make a dir to store files exported based on qseqid
+    Path(curr_id_dir).mkdir(parents=True, exist_ok=True)
+
+    # flush alignments to query files and delete the master
+    flush_outfile_to_tigs(temp_tig_file, curr_id_dir, "qseqid", False, temp_tig_file, args)
+
+    qfiles = ['%s/%s' % (curr_id_dir, i) for i in os.listdir(curr_id_dir)]
+    # open file containing a single contig's matches with a single query
+    for qfile in qfiles:
+        grimy = parse_blast_outfile(qfile, args)
+        # if we are cleaning, clean up the grimy list; else, do no cleaning
+        if args.noclean is False:
+            # pident is set to -1 here because the larger hit should be picked, not the one with the highest pident
+            grimy = clean_list_new(grimy, sstart, send, pident, False, args)
+
+        # write the cleaned up file
+        with open(qfile, 'w') as k:
+            filewriter = csv.writer(k, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
+                                    lineterminator="\n")
+            for records in grimy:
+                filewriter.writerow(records)
+
+    # combines all of the queryid files into an outfile for the contig
+    with open(temp_tig_file, 'wb') as tmp:
+        for out_file in qfiles:
+            with open(out_file, 'rb') as of:
+                copyfileobj(of, tmp)
+    rmtree(curr_id_dir)
 
 
 # makes sure the first entry of the blast_list is in the correct format #
@@ -384,11 +411,11 @@ def blast_to_outfile(db, query, outpath, args):
 
 
 # takes a blastn outfile and flushes its contents to separate files based on flush key [sseqid or qseqid] #
-def flush_outfile_to_tigs(outfile, flush_dir, flush_key, add_file_end, args):
+def flush_outfile_to_tigs(outfile, flush_dir, flush_key, add_file_end, name_file, args):
     tig_dict = {}
     cycle_count = 0
 
-    outfile_name = Path(outfile).stem.replace(".", "")  # removes . from outfile name
+    outfile_name = Path(name_file).stem.replace(".", "")  # removes . from outfile name
 
     with open(outfile, 'r') as f:
         # iterate through the file
@@ -475,6 +502,7 @@ def blast_driver(dbfilepath, subject, query, args):
 
     # elif (running vc/masker without outfile OR running db/dbf) AND using large method
     elif args.large:
+        delete_master = False
         # makes a temporary directory to store fasta files and blast outfiles #
         temp_fasta_fp = "%s/%s_individual_contigs" % (dv.PROG_TEMP_DIR, Path(subject).stem.replace(".", "_"))
         if Path(temp_fasta_fp).exists():
@@ -490,23 +518,27 @@ def blast_driver(dbfilepath, subject, query, args):
         contig_list = ["%s/%s" % (temp_fasta_fp, i) for i in os.listdir(temp_fasta_fp)]
 
         # blasts each contig individually against the genome database #
-        for tig in contig_list:
-            tig_filename = "%s/%s" % (dv.PROG_TEMP_DIR, Path(tig).stem)
-            execute_blast(dbfilepath, tig, tig_filename, "IMPLEMENT VVQ", args)
+        avail_blast_cores = dv.AVAIL_CORES
+        try:
+            avail_blast_cores = int(avail_blast_cores/args.num_threads)
+        except AttributeError:
+            pass
 
+        multi_pool = mp.Pool(processes=avail_blast_cores)
+
+        for tig in contig_list:
+            multi_pool.apply_async(execute_blast, args=(dbfilepath, tig, "%s/%s" % (dv.PROG_TEMP_DIR, Path(tig).stem),
+                                                        "IMPLEMENT VVQ", args, ))
+
+        multi_pool.close()
+        multi_pool.join()
+        del multi_pool
+
+        master_file = "%s/%s_%s_%s_master.out" % \
+                      (dv.PROG_TEMP_DIR, Path(subject).stem, Path(query).stem, dv.TIME_STR)
         # removes the directory containing the individual contig files
         rmtree(temp_fasta_fp)
 
-        # globs all the outfiles into a master
-        indv_outfiles = ["%s/%s" % (dv.PROG_TEMP_DIR, i) for i in os.listdir(dv.PROG_TEMP_DIR)]
-        master_file = "%s/%s_%s_%s_master.out" % \
-                      (dv.PROG_TEMP_DIR, Path(subject).stem, Path(query).stem, dv.TIME_STR)
-        with open(master_file, 'wb') as tmp:
-            for out_file in indv_outfiles:
-                with open(out_file, 'rb') as of:
-                    copyfileobj(of, tmp)
-                # removes contig file after it's been copied to the master
-                os.remove(out_file)
     # else (running vc/masker without outfile OR running db/dbf) AND not using large method
     else:
         # run blastn and get the filepath to the master
@@ -515,7 +547,22 @@ def blast_driver(dbfilepath, subject, query, args):
         master_file = execute_blast(dbfilepath, query, master_file, "IMPLEMENT VVQ", args)
 
     # flush alignments to tig files
-    flush_outfile_to_tigs(master_file, dv.PROG_TEMP_DIR, "sseqid", True, args)
+    if args.large:
+        indv_outfiles = ["%s/%s" % (dv.PROG_TEMP_DIR, i) for i in os.listdir(dv.PROG_TEMP_DIR)]
+        multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
+        for i in indv_outfiles:
+            multi_pool.apply_async(flush_outfile_to_tigs, args=(i, dv.PROG_TEMP_DIR, "sseqid", True, master_file, args))
+
+        multi_pool.close()
+        multi_pool.join()
+        del multi_pool
+    else:
+        flush_outfile_to_tigs(master_file, dv.PROG_TEMP_DIR, "sseqid", True, master_file, args)
+
+    # remove the original files
+    if args.large:
+        for i in indv_outfiles:
+            os.remove(i)
 
     # delete the master if it isn't the main operating file of the program
     if delete_master:
@@ -534,7 +581,7 @@ def blast_driver(dbfilepath, subject, query, args):
             Path(curr_id_dir).mkdir(parents=True, exist_ok=True)
 
             # flush alignments to query files and delete the master
-            flush_outfile_to_tigs(tmpfile, curr_id_dir, "qseqid", False, args)
+            flush_outfile_to_tigs(tmpfile, curr_id_dir, "qseqid", False, tmpfile, args)
 
             qfiles = ['%s/%s' % (curr_id_dir, i) for i in os.listdir(curr_id_dir)]
             # open file containing a single contig's matches with a single query
@@ -579,8 +626,15 @@ def blast_driver(dbfilepath, subject, query, args):
 
     if args.verbose:
         print("\nSorting each contig's alignments by sstart....")
-    # TODO: add multiprocessing here
-    sstart_sort_outfile(dv.PROG_TEMP_DIR, args)
+
+    multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
+    for outfile_name in ["%s/%s" % (dv.PROG_TEMP_DIR, i) for i in os.listdir(dv.PROG_TEMP_DIR)]:
+        multi_pool.apply_async(sstart_sort_outfile, args=(outfile_name, args,))
+
+    multi_pool.close()
+    multi_pool.join()
+    del multi_pool
+
     if args.verbose:
         print()
 
@@ -599,6 +653,13 @@ def execute_blast(db, query, outfilename,  inverse, args):
     # if running any other module, use -subject flag in BLASTn
     else:
         blastcommand = ['blastn', '-subject', db, '-query', query]
+
+    # remove the dust filter if indicated
+    try:
+        if args.dust == "no":
+            blastcommand.extend(["-dust", "no"])
+    except AttributeError:
+        pass
 
     # try to use a higher number of threads
     try:
@@ -628,17 +689,13 @@ def execute_blast(db, query, outfilename,  inverse, args):
     if args.verbose:
         printcommand = blastcommand[:-2]  # removes the -out command from the printed command
         printcommand[len(printcommand) - 1] = "\"" + printcommand[len(printcommand) - 1] + "\""
-        print("\nRunning BLAST with these options: ")
-        print(" ".join(printcommand))
+        print("\nRunning BLAST with these options:\n%s\n" % (" ".join(printcommand)), end="")
 
     blast = subprocess.run(blastcommand, stdout=subprocess.PIPE, universal_newlines=True)
 
     if blast.returncode != 0:
         print("FATAL: BLASTn process did not have a 0 return code")
         exit()
-
-    if args.verbose:
-        print("BLASTn process successfully completed!")
 
     # returns the path to the outfile
     return outfilename
@@ -661,8 +718,6 @@ def parse_blast_outfile(outfile_path, args):
         # this adds the sstrand qualifier, even if it was not present in the outfmt string
         if "sstrand" not in args.outfmt:
             args.outfmt.setdefault("sstrand", len(args.outfmt))
-
-        outfmt_specs = list(args.outfmt.keys())
 
         # gets the length of the contig if you're removing hits that cover the contig
         if args.notigcov:
@@ -707,42 +762,48 @@ def parse_blast_outfile(outfile_path, args):
     return grimy
 
 
+def write_blast_outfile(grimy_list, outfile_name):
+    with open(outfile_name, 'w') as k:
+        filewriter = csv.writer(k, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
+                                lineterminator="\n")
+        for records in grimy_list:
+            filewriter.writerow(records)
+
+
 # sorts outfiles in outfile_dir by sstart
-def sstart_sort_outfile(outfile_dir, args):
+def sstart_sort_outfile(outfile_path, args):
     sstart = args.outfmt["sstart"]
     send = args.outfmt["send"]
     if args.noclean:
         if "sstrand" not in args.outfmt:
             args.outfmt.setdefault("sstrand", len(args.outfmt))
 
-    outfiles = ["%s/%s" % (outfile_dir, i) for i in os.listdir(outfile_dir)]
-    for outfile_path in outfiles:
-        if args.verbose:
-            print("Sorting %s...." % outfile_path.split("_%stemp." % dv.PROG_NAME)[-1])
-        # reads in the entire outfile #
-        with open(outfile_path, 'r') as k:
-            unsorted = k.readlines()
-        # makes it into a list #
-        for k in range(0, len(unsorted)):
-            unsorted[k] = unsorted[k].rstrip().split('\t')
-            unsorted[k][sstart] = dv.BLASTN_TYPES["sstart"](unsorted[k][sstart])
-            unsorted[k][send] = dv.BLASTN_TYPES["send"](unsorted[k][send])
-            # switches minus hits so they're [min,max]
-            if unsorted[k][sstart] > unsorted[k][send]:
-                # appends strand to outformats that don't already have the sstrand
-                if len(unsorted[k]) == args.outfmt["sstrand"]:
-                    unsorted[k].append('minus')
-                unsorted[k][sstart], unsorted[k][send] = min(unsorted[k][send], unsorted[k][sstart]),\
-                                                         max(unsorted[k][send], unsorted[k][sstart])
-            else:
-                # appends strand to outformats that don't already have the sstrand
-                if len(unsorted[k]) == args.outfmt["sstrand"]:
-                    unsorted[k].append('plus')
-        # sorts it #
-        unsorted = sorted(unsorted, key=lambda x: x[sstart])
-        # writes it back out #
-        with open(outfile_path, 'w', newline='') as k:
-            filewriter = csv.writer(k, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
-                                    lineterminator="\n")
-            for records in unsorted:
-                filewriter.writerow(records)
+    if args.verbose:
+        print("Sorting %s...." % outfile_path.split("_%stemp." % dv.PROG_NAME)[-1])
+    # reads in the entire outfile #
+    with open(outfile_path, 'r') as k:
+        unsorted = k.readlines()
+    # makes it into a list #
+    for k in range(0, len(unsorted)):
+        unsorted[k] = unsorted[k].rstrip().split('\t')
+        unsorted[k][sstart] = dv.BLASTN_TYPES["sstart"](unsorted[k][sstart])
+        unsorted[k][send] = dv.BLASTN_TYPES["send"](unsorted[k][send])
+        # switches minus hits so they're [min,max]
+        if unsorted[k][sstart] > unsorted[k][send]:
+            # appends strand to outformats that don't already have the sstrand
+            if len(unsorted[k]) == args.outfmt["sstrand"]:
+                unsorted[k].append('minus')
+            unsorted[k][sstart], unsorted[k][send] = min(unsorted[k][send], unsorted[k][sstart]),\
+                                                        max(unsorted[k][send], unsorted[k][sstart])
+        else:
+            # appends strand to outformats that don't already have the sstrand
+            if len(unsorted[k]) == args.outfmt["sstrand"]:
+                unsorted[k].append('plus')
+    # sorts it #
+    unsorted = sorted(unsorted, key=lambda x: x[sstart])
+    # writes it back out #
+    with open(outfile_path, 'w', newline='') as k:
+        filewriter = csv.writer(k, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
+                                lineterminator="\n")
+        for records in unsorted:
+            filewriter.writerow(records)

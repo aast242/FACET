@@ -20,11 +20,12 @@ def help_message():
     print('')
     print('  .:| ' + dv.PROG_NAME + ' ' + dv.PROG_VERSION + ' |:.\n''')
     print('''\
-  database |  create a database and run %s; allows using multiple cores in BLASTn
-  db_free  |  run %s without creating a BLAST database
-  outfile  |  run %s on a previously generated BLAST output file
-  masker   |  use BLASTn to mask repetitive regions in the provided genome
   vc       |  identify miscalled SNPs in repetitive regions of fungal genomes using a VCF file
+  masker   |  use BLASTn to mask repetitive regions in the provided genome
+  database |  create a database and run %s; allows using multiple cores in BLASTn
+  outfile  |  run %s on a previously generated BLAST output file
+  db_free  |  run %s without creating a BLAST database
+  
   
   Use %s <module> -h to learn more about specific modules
     ''' % (dv.PROG_NAME, dv.PROG_NAME, dv.PROG_NAME, dv.PROG_NAME))
@@ -97,7 +98,7 @@ if __name__ == '__main__':
     db_parser.add_argument('subject', help="filepath to fasta that will be used as the subject", type=str)
     db_parser.add_argument('query', help="filepath to fasta that will be used as the query")
     db_parser.add_argument('--task', default="megablast", help="allows users to run different blast modes", type=str,
-                           choices=['blastn-short','blastn', 'megablast','dc-megablast'])
+                           choices=['blastn-short', 'blastn', 'megablast', 'dc-megablast'])
     db_parser.add_argument("--evalue", default=dv.BLASTN_EVAL, type=str, dest='blaste',
                            help='e-value for the BLASTn [default: %s]' % dv.BLASTN_EVAL, nargs='?')
     db_parser.add_argument("--num_threads", default=2, type=int,
@@ -108,6 +109,8 @@ if __name__ == '__main__':
     db_parser.add_argument("-t", "--notigcov", action='store_true', help="remove hits that cover the entire tig")
     db_parser.add_argument("--large", action='store_true', help="splits query into contigs and runs BLAST against the "
                                                                 "created database with each contig to improve runtime")
+    db_parser.add_argument("--dust", type=str, default="yes", choices=["yes", "no"],
+                           help="filter low complexity regions in BLAST [default: yes]", nargs='?')
 
     # ----------------------------------------------------------- #
     # DB_FREE PARSER: run FACET without creating a blast database #
@@ -122,13 +125,15 @@ if __name__ == '__main__':
     db_free_parser.add_argument('subject', help="filepath to fasta that will be used as the subject", type=str)
     db_free_parser.add_argument('query', help="filepath to fasta that will be used as the query", type=str)
     db_free_parser.add_argument('--task', default="megablast", help="allows users to run different blast modes",
-                                type=str, choices=['blastn-short','blastn', 'megablast','dc-megablast'])
+                                type=str, choices=['blastn-short', 'blastn', 'megablast', 'dc-megablast'])
     db_free_parser.add_argument("--evalue", default=dv.BLASTN_EVAL, type=str, dest='blaste',
                                 help='e-value for the BLASTn [default: %s]' % dv.BLASTN_EVAL, nargs='?')
     db_free_parser.add_argument("-t", "--notigcov", action='store_true', help="remove hits that cover the entire tig")
     db_free_parser.add_argument("--large", action='store_true',
                                 help="splits query into contigs and runs BLAST against the created database "
                                      "with each contig to improve runtime")
+    db_free_parser.add_argument("--dust", type=str, default="yes", choices=["yes", "no"],
+                                help="filter low complexity regions in BLAST [default: yes]", nargs='?')
 
     # -------------------------------------------------------------- #
     # OUTFILE PARSER: run FACET on a pre-generated BLAST output file #
@@ -156,21 +161,21 @@ if __name__ == '__main__':
     # ------------------------------------------------------------ #
     # TODO: diploid(3)/haploid(2)/override flags (required)
     masker_parser = subparsers.add_parser('masker',
-                                           description='',
-                                           aliases=dv.MASKER_ALIAS,
-                                           epilog='Example: %s masker <genome.fasta> [options]' % dv.PROG_NAME,
-                                           usage='%(prog)s <genome> [options]')
+                                          description='',
+                                          aliases=dv.MASKER_ALIAS,
+                                          epilog='Example: %s masker <genome.fasta> [options]' % dv.PROG_NAME,
+                                          usage='%(prog)s <genome> [options]')
     masker_parser.add_argument('genome', help="filepath to a genome FASTA that will be masked",
-                                type=str)
+                               type=str)
     masker_parser.add_argument('--outfile', help="filepath to a self-blast outfile", type=str, default="", nargs='?')
     masker_parser.add_argument("--outfmt", default='facet',
-                                help="Allows for defining custom outfmts as long as they "
-                                     "contain all of the needed data for FACET to run. Accepts \'6\' and \'facet\' to "
-                                     "get those default outfmts.", nargs='?')
+                               help="Allows for defining custom outfmts as long as they "
+                                    "contain all of the needed data for FACET to run. Accepts \'6\' and \'facet\' to "
+                                    "get those default outfmts.", nargs='?')
     masker_parser.add_argument("--cov_depth", default=2, type=int,
-                                help='Coverage depth needed to be considered repetitive; in the context of a self-blast,'
-                                     ' coverage of 1 is unique because the contig will always align to itself'
-                                     ' [default: 2]', nargs='?')
+                               help='Coverage depth needed to be considered repetitive; in the context of a self-blast,'
+                                    ' coverage of 1 is unique because the contig will always align to itself'
+                                    ' [default: 2]', nargs='?')
     masker_parser.add_argument("--mask_char", default="n",
                                help="character that masked bases will be replaced with [default: n]", nargs='?')
     masker_parser.add_argument("--evalue", default=dv.BLASTN_SHORT_EVAL, type=str, dest='blaste',
@@ -179,11 +184,13 @@ if __name__ == '__main__':
     masker_parser.add_argument("--num_threads", default=2, type=int,
                                help="speeds up BLAST if your computer has multiple cores [default: 2]", nargs='?')
     masker_parser.add_argument("--force", action='store_true',
-                                help="forces the overwrite of existing data files")
+                               help="forces the overwrite of existing data files")
     masker_parser.add_argument("--overwritedb", action='store_true',
                                help="If a BLAST database with the same name as the program's created database"
                                     " is present, forces overwrite of the database")
     masker_parser.add_argument("-v", "--verbose", action='store_true', help="prints a lot more information")
+    masker_parser.add_argument("--dust", type=str, default="no", choices=["yes", "no"],
+                               help="filter low complexity regions in BLAST [default: no]", nargs='?')
 
     # dummy arguments to make this module run correctly #
     masker_parser.add_argument("--large", action="store_false", help=argparse.SUPPRESS)
@@ -196,12 +203,12 @@ if __name__ == '__main__':
     # VARIANT CALLER PARSER: Use an all-against-all BLAST to identify potential variant miscalls in a fungal genome #
     # ------------------------------------------------------------------------------------------------------------- #
     vc_parser = subparsers.add_parser('vc',
-                                          description='',
-                                          aliases=dv.VC_ALIAS,
-                                          epilog='Example: %s vc <file.vcf> <genome.fasta> [options]' % dv.PROG_NAME,
-                                          usage='%(prog)s <vcf_file> <genome.fasta> [options]')
+                                      description='',
+                                      aliases=dv.VC_ALIAS,
+                                      epilog='Example: %s vc <file.vcf> <genome.fasta> [options]' % dv.PROG_NAME,
+                                      usage='%(prog)s <vcf_file> <genome.fasta> [options]')
     vc_parser.add_argument('vcf_file', help="filepath to a VCF file containing SNP calls",
-                               type=str)
+                           type=str)
     vc_parser.add_argument('genome', help="filepath to reference genome used to generate vcf/outfile",
                            type=str)
     vc_parser.add_argument('--outfile', help="filepath to a self-blast outfile", type=str, default="", nargs='?')
@@ -213,7 +220,7 @@ if __name__ == '__main__':
                            help="forces the overwrite of existing data files")
     vc_parser.add_argument("--cov_depth", default=2, type=int,
                            help='Coverage depth needed to be considered repetitive; in the context of a self-blast,'
-                           ' coverage of 1 is unique because the contig will always align to itself [default: 2]',
+                                ' coverage of 1 is unique because the contig will always align to itself [default: 2]',
                            nargs='?')
     vc_parser.add_argument("--num_threads", default=2, type=int,
                            help="speeds up BLAST if your computer has multiple cores [default: 2]", nargs='?')
@@ -224,6 +231,8 @@ if __name__ == '__main__':
                            help="If a BLAST database with the same name as the program's created database "
                                 "is present, forces overwrite of the database")
     vc_parser.add_argument("-v", "--verbose", action='store_true', help="prints a lot more information")
+    vc_parser.add_argument("--dust", type=str, default="no", choices=["yes", "no"],
+                           help="filter low complexity regions in BLAST [default: no]", nargs='?')
     vc_parser.add_argument("-r", "--rplot", action='store_true', help="generates a datafile that can be loaded into R")
     vc_parser.add_argument("--rp_window_size", type=int, default=dv.RPLOT_WINDOW_SIZE,
                            help="Modifies window size for rplot [default: %s]" % dv.RPLOT_WINDOW_SIZE, nargs='?')
@@ -261,7 +270,7 @@ if __name__ == '__main__':
         print("\n%s exited due to a recognized fatal error" % dv.PROG_NAME)
         try:
             print("\nAttempting to remove temp directory.")
-            rmtree(dv.PROG_TEMP_DIR)
+            #rmtree(dv.PROG_TEMP_DIR)
             print("Successfully removed temp directory!")
             print("Exiting....")
             exit()
@@ -271,11 +280,10 @@ if __name__ == '__main__':
     except Exception:
         print("\n%s exited due to an unexpected error: %s" % (dv.PROG_NAME, sys.exc_info()[0]))
         try:
-            #print("\nAttempting to remove temp directory.")
-            #rmtree(dv.PROG_TEMP_DIR)
-            #print("Successfully removed temp directory!")
+            # print("\nAttempting to remove temp directory.")
+            # rmtree(dv.PROG_TEMP_DIR)
+            # print("Successfully removed temp directory!")
             raise
-            exit()
         except Exception:
             pass
         raise
