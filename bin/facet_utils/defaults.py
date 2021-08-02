@@ -4,7 +4,6 @@
 __author__ = "Alex Stewart"
 
 from datetime import datetime
-from os import sched_getaffinity, cpu_count
 from sys import platform
 from . import init_config
 
@@ -104,10 +103,12 @@ class ProgDefaults:
 
     # Multiprocessing
     if platform.startswith('linux'):
+        from os import sched_getaffinity
         AVAIL_CORES = len(sched_getaffinity(0))
         if AVAIL_CORES - 2 > 0:
             AVAIL_CORES -= 2
     else:  # allows multiprocessing on macOS and others
+        from os import cpu_count
         AVAIL_CORES = cpu_count()
         if AVAIL_CORES - 2 > 0:
             AVAIL_CORES -= 2
