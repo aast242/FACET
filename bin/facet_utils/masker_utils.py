@@ -82,15 +82,15 @@ def masker_driver(blast_outdir, args):
 
 # generates a masked chromosome sequence from the coverage list
 def list_get_masked_genome_seq(genome_seq, cov_list, args):
-    masked_seq = ""
+    masked_seq = []
     for base in range(0, len(genome_seq)):
         # if the base in the coverage string has >= coverage depth specified by user [default: 2]
         if cov_list[base] >= args.cov_depth:
             # masks that base in the provided genome using character specified by user [default: n]
-            masked_seq += args.mask_char
+            masked_seq.append(args.mask_char)
         else:
-            masked_seq += genome_seq[base]
-    return masked_seq
+            masked_seq.append(genome_seq[base])
+    return "".join(masked_seq)
 
 
 # splits genome file into individual contigs and dumps them to the dump_path

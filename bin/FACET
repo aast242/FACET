@@ -111,6 +111,9 @@ if __name__ == '__main__':
                                                                 "created database with each contig to improve runtime")
     db_parser.add_argument("--dust", type=str, default="yes", choices=["yes", "no"],
                            help="filter low complexity regions in BLAST [default: yes]", nargs='?')
+    db_parser.add_argument("--db_dir", type=str, default="", nargs='?',
+                           help="Specify a directory to output the BLASTn database created by FACET."
+                                " The default behaviour is to output databases to FACET's bin directory.")
 
     # ----------------------------------------------------------- #
     # DB_FREE PARSER: run FACET without creating a blast database #
@@ -191,6 +194,9 @@ if __name__ == '__main__':
     masker_parser.add_argument("-v", "--verbose", action='store_true', help="prints a lot more information")
     masker_parser.add_argument("--dust", type=str, default="no", choices=["yes", "no"],
                                help="filter low complexity regions in BLAST [default: no]", nargs='?')
+    masker_parser.add_argument("--db_dir", type=str, default="", nargs='?',
+                               help="Specify a directory to output the BLASTn database created by FACET."
+                                    " The default behaviour is to output databases to FACET's bin directory.")
 
     # dummy arguments to make this module run correctly #
     masker_parser.add_argument("--large", action="store_false", help=argparse.SUPPRESS)
@@ -238,6 +244,9 @@ if __name__ == '__main__':
                            help="Modifies window size for rplot [default: %s]" % dv.RPLOT_WINDOW_SIZE, nargs='?')
     vc_parser.add_argument("--rp_window_step", type=int, default=dv.RPLOT_WINDOW_STEP,
                            help="Modifies window step size for rplot [default: %s]" % dv.RPLOT_WINDOW_STEP, nargs='?')
+    vc_parser.add_argument("--db_dir", type=str, default="", nargs='?',
+                           help="Specify a directory to output the BLASTn database created by FACET."
+                                " The default behaviour is to output databases to FACET's bin directory.")
 
     # dummy arguments to make this module run correctly #
     vc_parser.add_argument("--large", action="store_false", help=argparse.SUPPRESS)
@@ -270,7 +279,7 @@ if __name__ == '__main__':
         print("\n%s exited due to a recognized fatal error" % dv.PROG_NAME)
         try:
             print("\nAttempting to remove temp directory.")
-            #rmtree(dv.PROG_TEMP_DIR)
+            # rmtree(dv.PROG_TEMP_DIR)
             print("Successfully removed temp directory!")
             print("Exiting....")
             exit()

@@ -112,3 +112,10 @@ class ProgDefaults:
         AVAIL_CORES = cpu_count()
         if AVAIL_CORES - 2 > 0:
             AVAIL_CORES -= 2
+
+    # Chunking large files
+    BIG_CHUNK_LEN = 250000
+    SMALL_CHUNK_LEN = 50000
+
+    # Cleaning chunks
+    CLEANING_CHUNK_ROUNDS = 4

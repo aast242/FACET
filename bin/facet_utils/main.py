@@ -37,7 +37,16 @@ class ProgParser:
         # creates a BLAST database #
         if args.verbose:
             print("\nCreating a BLAST database....")
-        dbfilepath = blast_utils.make_blast_db(user_db_name, contigs, facet_prog_dir, args)
+
+        if args.db_dir == "":  # default location for blastn db (FACET bin)
+            dbfilepath = blast_utils.make_blast_db(user_db_name, contigs, facet_prog_dir, args)
+        else:  # user specified location for blastn db
+            dboutput = Path(args.db_dir).resolve()
+            if dboutput.exists() and dboutput.is_dir():
+                dbfilepath = blast_utils.make_blast_db(user_db_name, contigs, str(dboutput), args)
+            else:
+                print("FATAL: User-provided db location \'%s\' does not exist or is not a directory!" % dboutput)
+                exit()
 
         # creates a folder for data exports #
         datafilepath = outdir_name + "/" + contigsFilename
@@ -183,7 +192,16 @@ class ProgParser:
         # creates a BLAST database #
         if args.verbose:
             print("\nCreating a BLAST database....")
-        dbfilepath = blast_utils.make_blast_db(user_db_name, Path(args.genome).resolve(), facet_prog_dir, args)
+
+        if args.db_dir == "":  # default location for blastn db (FACET bin)
+            dbfilepath = blast_utils.make_blast_db(user_db_name, Path(args.genome).resolve(), facet_prog_dir, args)
+        else:  # user specified location for blastn db
+            dboutput = Path(args.db_dir).resolve()
+            if dboutput.exists() and dboutput.is_dir():
+                dbfilepath = blast_utils.make_blast_db(user_db_name, Path(args.genome).resolve(), str(dboutput), args)
+            else:
+                print("FATAL: User-provided db location \'%s\' does not exist or is not a directory!" % dboutput)
+                exit()
 
         masker_utils.masker_driver(blast_utils.blast_driver(dbfilepath, args.genome, args.genome, args), args)
 
@@ -217,7 +235,17 @@ class ProgParser:
             # creates a BLAST database #
             if args.verbose:
                 print("\nCreating a BLAST database....")
-            dbfilepath = blast_utils.make_blast_db(user_db_name, args.genome, facet_prog_dir, args)
+
+            if args.db_dir == "":  # default location for blastn db (FACET bin)
+                dbfilepath = blast_utils.make_blast_db(user_db_name, Path(args.genome).resolve(), facet_prog_dir, args)
+            else:  # user specified location for blastn db
+                dboutput = Path(args.db_dir).resolve()
+                if dboutput.exists() and dboutput.is_dir():
+                    dbfilepath = blast_utils.make_blast_db(user_db_name, Path(args.genome).resolve(), str(dboutput),
+                                                           args)
+                else:
+                    print("FATAL: User-provided db location \'%s\' does not exist or is not a directory!" % dboutput)
+                    exit()
 
             # runs blast on created database
             blast_utils.blast_driver(dbfilepath, args.genome, args.genome, args)

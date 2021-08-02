@@ -8,6 +8,7 @@ import os
 import csv
 import multiprocessing as mp
 from pathlib import Path
+from itertools import chain, islice
 from shutil import copyfileobj, rmtree
 
 from Bio import SeqIO
@@ -150,16 +151,38 @@ def clean_list_new(cluttered, index1, index2, pident_index, pident_check, args):
     return cluttered
 
 
+def clean_list_chunks(cluttered, index1, index2, pident_index, pident_check, chunk_rounds, args):
+    for cycle_ct in range(1, chunk_rounds + 1):
+        print(len(cluttered))
+        # splits the cluttered list into small chunks
+        cluttered = [cluttered[x:x + dv.SMALL_CHUNK_LEN] for x in range(0, len(cluttered), dv.SMALL_CHUNK_LEN)]
+
+        multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
+
+        cluttered = list(chain.from_iterable(
+            [multi_pool.apply_async(clean_list_new,
+                                    args=(x, index1, index2, pident_index, pident_check, args)).get()
+             for x in cluttered]))
+
+        multi_pool.close()
+        multi_pool.join()
+        del multi_pool
+    return clean_list_new(cluttered, index1, index2, pident_index, pident_check, args)
+
+
 # takes the name of the new directory and the file used to create the database and makes a blast database #
 # also returns the filepath of the newly created blast database                                           #
 def make_blast_db(dbname, dbfile, out_dir, args):
-    outfilename = out_dir + "/" + dbname + "/" + str(
-        Path(Path(dbfile).resolve().name).with_suffix('')) + "_db.fasta"
-    try:
-        os.mkdir(out_dir + "/" + dbname)
-    except FileExistsError:
-        if args.verbose:
-            print("Directory \'" + dbname + '\' already exists; using it')
+    if args.db_dir != "":
+        outfilename = out_dir + "/" + str(Path(Path(dbfile).resolve().name).with_suffix('')) + "_db.fasta"
+    else:
+        outfilename = out_dir + "/" + dbname + "/" + str(
+            Path(Path(dbfile).resolve().name).with_suffix('')) + "_db.fasta"
+        try:
+            os.mkdir(out_dir + "/" + dbname)
+        except FileExistsError:
+            if args.verbose:
+                print("Directory \'" + dbname + '\' already exists; using it')
     # checks to see if a blast database of the same name has already been created at the target #
     # If it has, checks to see if permission to overwrite has been granted                      #
     if Path(outfilename + ".nhr").exists() and Path(outfilename + ".nin").exists() and \
@@ -196,9 +219,22 @@ def infile_driver(blast_infile, args):
     verify_outfmt(blast_infile, args)
 
     # flush alignments to tig files
+    chunk_large_file(blast_infile, dv.PROG_TEMP_DIR, dv.BIG_CHUNK_LEN, args)
+    chunkfiles = ['%s/%s' % (dv.PROG_TEMP_DIR, i) for i in os.listdir(dv.PROG_TEMP_DIR)]
+
     if args.verbose:
-        print("\nFlushing alignments from master file based on contig ID....")
-    flush_outfile_to_tigs(blast_infile, dv.PROG_TEMP_DIR, "sseqid", True, blast_infile, args)
+        print("\nFlushing alignments from master chunks based on contig ID....\n")
+    multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
+    for tmp_chunk in chunkfiles:
+        multi_pool.apply_async(flush_outfile_to_tigs,
+                               args=(tmp_chunk, dv.PROG_TEMP_DIR, "sseqid", True, blast_infile, args))
+    multi_pool.close()
+    multi_pool.join()
+    del multi_pool
+
+    # removes the temporary chunk files
+    for tmp_chunk in chunkfiles:
+        os.remove(tmp_chunk)
 
     # master becomes a list of paths to the files in the temp_dir
     master_file = ['%s/%s' % (dv.PROG_TEMP_DIR, i) for i in os.listdir(dv.PROG_TEMP_DIR)]
@@ -206,18 +242,84 @@ def infile_driver(blast_infile, args):
     # Parses each tig
     if args.verbose:
         print("Parsing each contig file....")
-    multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
+
+    # TODO: MAKE THIS TO WHERE EACH CONTIG FILE IS CHUNKED AND MULTIPROCESSED INSTEAD OF MULTIPROCESSING IT ALL AT ONCE
+
     for tmpfile in master_file:
+        if args.verbose:
+            print()
+
         # if we aren't cleaning, no need to break up by query
         if args.noclean:
-            multi_pool.apply_async(write_blast_outfile, args=(parse_blast_outfile(tmpfile, args), tmpfile, ))
+            # creates a directory to store chunks
+            curr_sub_dir = "%s_querychunks" % tmpfile
+            try:
+                os.mkdir(curr_sub_dir)
+            except Exception:
+                print("FATAL: Unable to create directory \'%s\' to store chunks" % curr_sub_dir)
+                exit()
+            chunk_large_file(tmpfile, curr_sub_dir, dv.SMALL_CHUNK_LEN, args)  # chunks subject file into small files
+
+            os.remove(tmpfile)  # removes the tempfile so that write_blast_outfile will correctly store alns
+
+            curr_chunks = ["%s/%s" % (curr_sub_dir, i) for i in os.listdir(curr_sub_dir)]
+            multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
+            for chunk_id in curr_chunks:
+                multi_pool.apply_async(write_blast_outfile, args=(parse_blast_outfile(chunk_id, args), tmpfile, args,))
+            multi_pool.close()
+            multi_pool.join()
+            del multi_pool
+
+            # cleans up the directory for the chunk and removes it
+            for chunk_id in curr_chunks:
+                os.remove(chunk_id)
+            os.rmdir(curr_sub_dir)
+
         # if we are cleaning, break each tig up by query
         else:
-            multi_pool.apply_async(individual_tig_parser, args=(tmpfile, args, sstart, send, pident, ))
+            curr_sub_dir = "%s/%s_outdir" % (dv.PROG_TEMP_DIR, Path(tmpfile).stem)
+            try:
+                os.mkdir(curr_sub_dir)
+            except Exception:
+                print("FATAL: Unable to create directory \'%s\' to store chunks" % curr_sub_dir)
+                exit()
+            chunk_large_file(tmpfile, curr_sub_dir, dv.SMALL_CHUNK_LEN, args)  # chunks subject file into small files
 
-    multi_pool.close()
-    multi_pool.join()
-    del multi_pool
+            os.remove(tmpfile)  # removes the tempfile so that write_blast_outfile will correctly store alns
+
+            curr_chunks = ["%s/%s" % (curr_sub_dir, i) for i in os.listdir(curr_sub_dir)]
+            multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
+            if args.verbose:
+                print("Flushing alignments from master chunks based on qseqid....")
+            for chunk_id in curr_chunks:
+                # flush alignments to query files and delete the master
+                multi_pool.apply_async(flush_outfile_to_tigs,
+                                       args=(chunk_id, curr_sub_dir, "qseqid", False, tmpfile, args))
+            multi_pool.close()
+            multi_pool.join()
+            del multi_pool
+
+            # removes the chunk files
+            for i in curr_chunks:
+                os.remove(i)
+
+            qfiles = ['%s/%s' % (curr_sub_dir, i) for i in os.listdir(curr_sub_dir)]
+            # open file containing a single contig's matches with a single query
+            multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
+            if args.verbose:
+                print("Parsing and cleaning each query outfile")
+            for qfile in qfiles:
+                multi_pool.apply_async(individual_tig_parser, args=(qfile, sstart, send, pident, args, ))
+            multi_pool.close()
+            multi_pool.join()
+            del multi_pool
+
+            # combines all of the queryid files into an outfile for the contig
+            with open(tmpfile, 'wb') as tmp:
+                for out_file in qfiles:
+                    with open(out_file, 'rb') as of:
+                        copyfileobj(of, tmp)
+            rmtree(curr_sub_dir)
 
     # concatenates repeat data if noclean and nocat have not been called
     if args.nocat is False and args.noclean is False:
@@ -238,7 +340,6 @@ def infile_driver(blast_infile, args):
     if args.verbose:
         print("\nSorting each contig's alignments by sstart....")
 
-
     # sort each contig's alignments by sstart
     multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
     for outfile_name in ["%s/%s" % (dv.PROG_TEMP_DIR, i) for i in os.listdir(dv.PROG_TEMP_DIR)]:
@@ -254,36 +355,19 @@ def infile_driver(blast_infile, args):
     return dv.PROG_TEMP_DIR
 
 
-def individual_tig_parser(temp_tig_file, args, sstart, send, pident):
-    curr_id_dir = "%s/%s_outdir" % (dv.PROG_TEMP_DIR, Path(temp_tig_file).stem)
-    # make a dir to store files exported based on qseqid
-    Path(curr_id_dir).mkdir(parents=True, exist_ok=True)
+def individual_tig_parser(qfile, sstart, send, pident, args):
+    grimy = parse_blast_outfile(qfile, args)
+    # if we are cleaning, clean up the grimy list; else, do no cleaning
+    if args.noclean is False:
+        # pident is set to -1 here because the larger hit should be picked, not the one with the highest pident
+        grimy = clean_list_new(grimy, sstart, send, pident, False, args)
 
-    # flush alignments to query files and delete the master
-    flush_outfile_to_tigs(temp_tig_file, curr_id_dir, "qseqid", False, temp_tig_file, args)
-
-    qfiles = ['%s/%s' % (curr_id_dir, i) for i in os.listdir(curr_id_dir)]
-    # open file containing a single contig's matches with a single query
-    for qfile in qfiles:
-        grimy = parse_blast_outfile(qfile, args)
-        # if we are cleaning, clean up the grimy list; else, do no cleaning
-        if args.noclean is False:
-            # pident is set to -1 here because the larger hit should be picked, not the one with the highest pident
-            grimy = clean_list_new(grimy, sstart, send, pident, False, args)
-
-        # write the cleaned up file
-        with open(qfile, 'w') as k:
-            filewriter = csv.writer(k, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
-                                    lineterminator="\n")
-            for records in grimy:
-                filewriter.writerow(records)
-
-    # combines all of the queryid files into an outfile for the contig
-    with open(temp_tig_file, 'wb') as tmp:
-        for out_file in qfiles:
-            with open(out_file, 'rb') as of:
-                copyfileobj(of, tmp)
-    rmtree(curr_id_dir)
+    # write the cleaned up file
+    with open(qfile, 'w') as k:
+        filewriter = csv.writer(k, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
+                                lineterminator="\n")
+        for records in grimy:
+            filewriter.writerow(records)
 
 
 # makes sure the first entry of the blast_list is in the correct format #
@@ -520,7 +604,7 @@ def blast_driver(dbfilepath, subject, query, args):
         # blasts each contig individually against the genome database #
         avail_blast_cores = dv.AVAIL_CORES
         try:
-            avail_blast_cores = int(avail_blast_cores/args.num_threads)
+            avail_blast_cores = int(avail_blast_cores / args.num_threads)
         except AttributeError:
             pass
 
@@ -528,7 +612,7 @@ def blast_driver(dbfilepath, subject, query, args):
 
         for tig in contig_list:
             multi_pool.apply_async(execute_blast, args=(dbfilepath, tig, "%s/%s" % (dv.PROG_TEMP_DIR, Path(tig).stem),
-                                                        "IMPLEMENT VVQ", args, ))
+                                                        "IMPLEMENT VVQ", args,))
 
         multi_pool.close()
         multi_pool.join()
@@ -646,7 +730,7 @@ def blast_driver(dbfilepath, subject, query, args):
 # if shortq == true, the command runs a shortblast instead of a normal blast  #
 # shortblast has an evalue of 1e-5, normal blast has an evalue of 1e-15       #
 # TODO: implement inverse (run one blast w -sub x -query y; one with -sub y query x); need to normalize output format
-def execute_blast(db, query, outfilename,  inverse, args):
+def execute_blast(db, query, outfilename, inverse, args):
     # if running db, masker, or vcf module, use -db flag in BLASTn
     if args.subparser_id in dv.DB_ALIAS or args.subparser_id in dv.MASKER_ALIAS or args.subparser_id in dv.VC_ALIAS:
         blastcommand = ['blastn', '-db', db, "-query", query]
@@ -762,8 +846,8 @@ def parse_blast_outfile(outfile_path, args):
     return grimy
 
 
-def write_blast_outfile(grimy_list, outfile_name):
-    with open(outfile_name, 'w') as k:
+def write_blast_outfile(grimy_list, outfile_name, args):
+    with open(outfile_name, 'a') as k:
         filewriter = csv.writer(k, delimiter='\t', quotechar='\"', quoting=csv.QUOTE_MINIMAL,
                                 lineterminator="\n")
         for records in grimy_list:
@@ -793,8 +877,8 @@ def sstart_sort_outfile(outfile_path, args):
             # appends strand to outformats that don't already have the sstrand
             if len(unsorted[k]) == args.outfmt["sstrand"]:
                 unsorted[k].append('minus')
-            unsorted[k][sstart], unsorted[k][send] = min(unsorted[k][send], unsorted[k][sstart]),\
-                                                        max(unsorted[k][send], unsorted[k][sstart])
+            unsorted[k][sstart], unsorted[k][send] = min(unsorted[k][send], unsorted[k][sstart]), \
+                                                     max(unsorted[k][send], unsorted[k][sstart])
         else:
             # appends strand to outformats that don't already have the sstrand
             if len(unsorted[k]) == args.outfmt["sstrand"]:
@@ -807,3 +891,22 @@ def sstart_sort_outfile(outfile_path, args):
                                 lineterminator="\n")
         for records in unsorted:
             filewriter.writerow(records)
+
+
+def chunk(iterable, n):
+    iterable = iter(iterable)
+    while True:
+        try:
+            yield chain([next(iterable)], islice(iterable, n - 1))
+        except StopIteration:
+            return
+
+
+def chunk_large_file(large_filename, chunk_outdir, chunk_len, args):
+    if args.verbose:
+        print("Splitting \'%s\' into %s-line chunks" % (large_filename, chunk_len))
+    with open(large_filename) as f:
+        for i, lines in enumerate(chunk(f, chunk_len)):
+            chunkname = "%s/%s.chunk%s" % (chunk_outdir, Path(large_filename).name, i)
+            with open(chunkname, 'w') as chunk_out:
+                chunk_out.writelines(lines)
