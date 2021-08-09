@@ -37,13 +37,21 @@ def vc_driver(args):
                                                            Path(args.genome).stem, dv.TIME_STR,
                                                            i.replace(".", ""), dv.TIME_STR,
                                                            dv.PROG_NAME, i)
+        fp_ending = "%s_%s_%stemp.%s" % (i.replace(".", ""), dv.TIME_STR, dv.PROG_NAME, i)
+
         # if the file doesn't exist, create an empty one so we know it COULD have existed
-        if Path(empty_fp).exists() is False:
+        file_exists = False
+        for bof in blast_outfiles:
+            if bof.endswith(fp_ending):
+                file_exists = True
+                break
+        if file_exists is False:
             open(empty_fp, 'w').close()
 
     # get VCF file that contains only SNPs
     if args.verbose:
         print("\nParsing \'%s\' to find positions with variant calls...." % Path(args.vcf_file).name)
+    # TODO: ADD MULTIPROCESSING AND CHUNKING HERE
     flush_vcf_file(Path(args.vcf_file).resolve())
 
     if Path(dv.VCF_VARIANT_TEMPFILE).exists() is False:

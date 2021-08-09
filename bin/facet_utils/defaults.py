@@ -30,6 +30,9 @@ class ProgDefaults:
     BLASTN_EVAL = "1e-15"
     BLASTN_SHORT_EVAL = "1e-5"
 
+    # max_target seqs
+    BLASTN_MAX_TARGET_SEQS = 20000
+
     # buffer for determining whether alignments 'overlap'
     ALN_CLEANING_BUFFER = 25
 
@@ -116,6 +119,3 @@ class ProgDefaults:
     # Chunking large files
     BIG_CHUNK_LEN = 250000
     SMALL_CHUNK_LEN = 50000
-
-    # Cleaning chunks
-    CLEANING_CHUNK_ROUNDS = 4

@@ -7,6 +7,7 @@ import subprocess
 import os
 import csv
 import multiprocessing as mp
+from time import sleep
 from pathlib import Path
 from itertools import chain, islice
 from shutil import copyfileobj, rmtree
@@ -16,6 +17,12 @@ from Bio import SeqIO
 from .defaults import ProgDefaults as dv
 from . import btop_utils
 from . import masker_utils
+
+failed_blast = mp.Event()
+
+
+def get_blast_state():
+    return failed_blast.is_set()
 
 
 # takes a list of lists and retains elements that have no complete overlap with other elements  #
@@ -173,7 +180,7 @@ def clean_list_chunks(cluttered, index1, index2, pident_index, pident_check, chu
 # takes the name of the new directory and the file used to create the database and makes a blast database #
 # also returns the filepath of the newly created blast database                                           #
 def make_blast_db(dbname, dbfile, out_dir, args):
-    if args.db_dir != "":
+    if args.db_dir != "" and args.large is False:  # TODO MAKE SURE THIS CHECK IS CORRECT
         outfilename = out_dir + "/" + str(Path(Path(dbfile).resolve().name).with_suffix('')) + "_db.fasta"
     else:
         outfilename = out_dir + "/" + dbname + "/" + str(
@@ -195,7 +202,7 @@ def make_blast_db(dbname, dbfile, out_dir, args):
                             stdout=subprocess.PIPE, universal_newlines=True, env={'PATH': os.getenv('PATH')})
         if p1.returncode != 0:
             print("FATAL: Unable to create BLAST database!")
-            exit()
+            raise SystemExit
         elif args.verbose:
             print("\nBLAST database created at %s" % outfilename)
     return outfilename
@@ -214,7 +221,7 @@ def infile_driver(blast_infile, args):
             print("FATAL: outfmt does not contain btop and \'--verboseoutput\' specifed!")
             print("       provided outfmt does not contain btop information and cannot be"
                   " used to make verbose outputs!")
-            exit()
+            raise SystemExit
 
     verify_outfmt(blast_infile, args)
 
@@ -257,7 +264,7 @@ def infile_driver(blast_infile, args):
                 os.mkdir(curr_sub_dir)
             except Exception:
                 print("FATAL: Unable to create directory \'%s\' to store chunks" % curr_sub_dir)
-                exit()
+                raise SystemExit
             chunk_large_file(tmpfile, curr_sub_dir, dv.SMALL_CHUNK_LEN, args)  # chunks subject file into small files
 
             os.remove(tmpfile)  # removes the tempfile so that write_blast_outfile will correctly store alns
@@ -282,7 +289,7 @@ def infile_driver(blast_infile, args):
                 os.mkdir(curr_sub_dir)
             except Exception:
                 print("FATAL: Unable to create directory \'%s\' to store chunks" % curr_sub_dir)
-                exit()
+                raise SystemExit
             chunk_large_file(tmpfile, curr_sub_dir, dv.SMALL_CHUNK_LEN, args)  # chunks subject file into small files
 
             os.remove(tmpfile)  # removes the tempfile so that write_blast_outfile will correctly store alns
@@ -309,7 +316,7 @@ def infile_driver(blast_infile, args):
             if args.verbose:
                 print("Parsing and cleaning each query outfile")
             for qfile in qfiles:
-                multi_pool.apply_async(individual_tig_parser, args=(qfile, sstart, send, pident, args, ))
+                multi_pool.apply_async(individual_tig_parser, args=(qfile, sstart, send, pident, args,))
             multi_pool.close()
             multi_pool.join()
             del multi_pool
@@ -379,7 +386,7 @@ def verify_outfmt(blast_list, args):
         check_list = line.split('\t')
     except Exception:
         print("\nFATAL: infile could not be accessed or is empty")
-        exit()
+        raise SystemExit
 
     if "blastHit_" in check_list[0] or "shortHit_" in check_list[0]:
         check_list.pop(0)
@@ -392,14 +399,14 @@ def verify_outfmt(blast_list, args):
         except Exception:
             print("FATAL: first row of input does not match provided outfmt:")
             print("\"%s\"" % generate_outfmt_str(args))
-            exit()
+            raise SystemExit
 
     if args.verboseoutput:
         try:
             btop_utils.btop_to_cigar(btop_utils.parse_btop(check_list[args.outfmt["btop"]]))
         except Exception:
             print("FATAL: BTOP cannot be converted to CIGAR")
-            exit()
+            raise SystemExit
 
 
 # parse outfmt strings to allow users to use custom outfmts #
@@ -436,7 +443,7 @@ def outfmt_parser(args):
                 # if it isnt, return a fatal error
                 else:
                     print("FATAL: Invalid format specifier (%s)" % outfmt_list[fmt_spec])
-                    exit()
+                    raise SystemExit
 
             # defines required keys based on parser type and options
             if args.subparser_id in dv.MASKER_ALIAS:
@@ -456,7 +463,7 @@ def outfmt_parser(args):
                     print("FATAL: Required outformat specifier is not present (%s)" % spec)
                     print("The following outformat specifiers are required: ")
                     print(" ".join(required_keys))
-                    exit()
+                    raise SystemExit
 
             # if all checks are passed, sets the outfmt arg equal to the custom outfmt
             args.outfmt = custom_outfmt
@@ -464,7 +471,7 @@ def outfmt_parser(args):
         else:
             print("FATAL: invalid custom outformat! Custom outfmt should look something like this: ")
             print("\"6 sseqid qseqid sstart sstop qstart qstop\"")
-            exit()
+            raise SystemExit
 
 
 # generate an outfmt string from the keys in an outfmt dictionary
@@ -587,19 +594,47 @@ def blast_driver(dbfilepath, subject, query, args):
     # elif (running vc/masker without outfile OR running db/dbf) AND using large method
     elif args.large:
         delete_master = False
-        # makes a temporary directory to store fasta files and blast outfiles #
-        temp_fasta_fp = "%s/%s_individual_contigs" % (dv.PROG_TEMP_DIR, Path(subject).stem.replace(".", "_"))
+        # makes a temporary directory to store contigs from the query #
+        temp_fasta_fp = "%s/query_individual_contigs" % dv.PROG_TEMP_DIR
+        temp_fasta_fp_subj = "%s/subject_individual_contigs" % dv.PROG_TEMP_DIR
+        temp_db_name = "%s_indv_tig_db" % (Path(subject).stem.replace(".", "_"))
+
+        # tries to make directory for storing query contigs
         if Path(temp_fasta_fp).exists():
             print("FATAL: \'%s\' already exists! How did this happen?!" % temp_fasta_fp)
-            exit()
+            raise SystemExit
         else:
             os.mkdir(temp_fasta_fp)
 
-        # creates a fasta file for each contig present in the genome file #
+        # tries to make directory for storing subject contigs
+        if Path(temp_fasta_fp_subj).exists():
+            print("FATAL: \'%s\' already exists! How did this happen?!" % temp_fasta_fp_subj)
+            raise SystemExit
+        else:
+            os.mkdir(temp_fasta_fp_subj)
+
+        # creates a fasta file for each contig present in the query file #
         if args.verbose:
-            print("\nGetting individual contigs from genome file")
-        masker_utils.split_contigs(temp_fasta_fp, Path(subject).resolve())
-        contig_list = ["%s/%s" % (temp_fasta_fp, i) for i in os.listdir(temp_fasta_fp)]
+            print("\nGetting individual contigs from query file")
+        masker_utils.split_contigs(temp_fasta_fp, Path(query).resolve())
+        query_contigs = ["%s/%s" % (temp_fasta_fp, i) for i in os.listdir(temp_fasta_fp)]
+
+        # creates a fasta file for each contig present in the subject file #
+        if args.verbose:
+            print("\nGetting individual contigs from subject file")
+        masker_utils.split_contigs(temp_fasta_fp_subj, Path(query).resolve())
+        subject_contigs = ["%s/%s" % (temp_fasta_fp_subj, i) for i in os.listdir(temp_fasta_fp_subj)]
+
+        if args.verbose:
+            print("Creating a temporary BLAST database for each contig in the subject....")
+        multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
+
+        for stig in subject_contigs:
+            multi_pool.apply_async(make_blast_db, args=(temp_db_name, stig, dv.PROG_TEMP_DIR, args,))
+
+        multi_pool.close()
+        multi_pool.join()
+        del multi_pool
 
         # blasts each contig individually against the genome database #
         avail_blast_cores = dv.AVAIL_CORES
@@ -608,20 +643,46 @@ def blast_driver(dbfilepath, subject, query, args):
         except AttributeError:
             pass
 
+        def mp_ecb(proc_return):
+            failed_blast.set()
+            sleep(5)
+            multi_pool.terminate()
+            raise Exception("FATAL: error in a child process\n%s" % proc_return)
+
+        # avail_blast_cores = 3  # TODO: REMOVE THIS LATER; FOR TESTING ONLY
+
         multi_pool = mp.Pool(processes=avail_blast_cores)
 
-        for tig in contig_list:
-            multi_pool.apply_async(execute_blast, args=(dbfilepath, tig, "%s/%s" % (dv.PROG_TEMP_DIR, Path(tig).stem),
-                                                        "IMPLEMENT VVQ", args,))
-
+        for stig in subject_contigs:
+            curr_stig_db = dv.PROG_TEMP_DIR + "/" + temp_db_name + "/" + \
+                           str(Path(Path(stig).resolve().name).with_suffix('')) + "_db.fasta"
+            for qtig in query_contigs:
+                multi_pool.apply_async(execute_blast,
+                                       args=(curr_stig_db, qtig, "%s/%s_%s" %
+                                             (dv.PROG_TEMP_DIR, Path(stig).stem, Path(qtig).stem),
+                                             "IMPLEMENT VVQ", args,),
+                                       error_callback=mp_ecb)
         multi_pool.close()
         multi_pool.join()
         del multi_pool
+
+        if get_blast_state() is True:
+            print("FATAL: A BLASTn process did not successfully complete!")
+            raise SystemExit
+
+        # for tig in query_contigs:
+        #     multi_pool.apply_async(execute_blast, args=(dbfilepath, tig, "%s/%s" % (dv.PROG_TEMP_DIR, Path(tig).stem),
+        #                                                 "IMPLEMENT VVQ", args,))
+
+        # rename the dbfile to reflect where it actually is
+        temp_db_name = "%s/%s" % (dv.PROG_TEMP_DIR, temp_db_name)
 
         master_file = "%s/%s_%s_%s_master.out" % \
                       (dv.PROG_TEMP_DIR, Path(subject).stem, Path(query).stem, dv.TIME_STR)
         # removes the directory containing the individual contig files
         rmtree(temp_fasta_fp)
+        rmtree(temp_fasta_fp_subj)
+        rmtree(temp_db_name)
 
     # else (running vc/masker without outfile OR running db/dbf) AND not using large method
     else:
@@ -758,6 +819,9 @@ def execute_blast(db, query, outfilename, inverse, args):
     # add in the evalue parameter
     blastcommand.extend(["-evalue", args.blaste])
 
+    # add in the -max_target_seqs parameter
+    blastcommand.extend(["-max_target_seqs", dv.BLASTN_MAX_TARGET_SEQS])
+
     # allows user to run BLAST in different modes
     if args.subparser_id in dv.DB_ALIAS or args.subparser_id in dv.FREE_ALIAS:
         # Megablast is the default operation for blastn, so don't add anything if task is default, else add task
@@ -770,16 +834,27 @@ def execute_blast(db, query, outfilename, inverse, args):
     # make blast pipe the results to a file in the temp directory
     blastcommand.extend(["-out", outfilename])
 
-    if args.verbose:
-        printcommand = blastcommand[:-2]  # removes the -out command from the printed command
-        printcommand[len(printcommand) - 1] = "\"" + printcommand[len(printcommand) - 1] + "\""
-        print("\nRunning BLAST with these options:\n%s\n" % (" ".join(printcommand)), end="")
+    if get_blast_state() is False:
+        blast = subprocess.Popen(blastcommand, stdout=subprocess.PIPE, universal_newlines=True)
+        if args.verbose:
+            printcommand = blastcommand[:-2]  # removes the -out command from the printed command
+            printcommand[len(printcommand) - 1] = "\"" + printcommand[len(printcommand) - 1] + "\""
+            print("\nRunning BLAST (pid: %s) with these options:\n%s\n" % (blast.pid, " ".join(printcommand)), end="")
+    else:
+        print("NOT STARTING BLASTn COMMAND %s" % " ".join(blastcommand))
+        raise Exception("FATAL: A BLASTn process has exited with a non-zero return code")
 
-    blast = subprocess.run(blastcommand, stdout=subprocess.PIPE, universal_newlines=True)
+    while blast.poll() is None:
+        if get_blast_state() is True:
+            blast.kill()
+            raise Exception("FATAL: A BLASTn process has exited with a non-zero return code")
+        sleep(2)
 
     if blast.returncode != 0:
-        print("FATAL: BLASTn process did not have a 0 return code")
-        exit()
+        raise Exception("FATAL: BLASTn process %s did not have a 0 return code" % blast.pid)
+    else:
+        if args.verbose:
+            print("BLASTn process %s completed successfully!" % blast.pid)
 
     # returns the path to the outfile
     return outfilename

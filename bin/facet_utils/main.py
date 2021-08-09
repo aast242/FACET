@@ -188,22 +188,26 @@ class ProgParser:
         user_db_name = dv.USER_DB_NAME
 
         facet_prog_dir = str(Path(__file__).parent.absolute().resolve())
+        # if there is no outfile
+        if args.outfile == "":
+            # creates a BLAST database #
+            if args.verbose:
+                print("\nCreating a BLAST database....")
 
-        # creates a BLAST database #
-        if args.verbose:
-            print("\nCreating a BLAST database....")
-
-        if args.db_dir == "":  # default location for blastn db (FACET bin)
-            dbfilepath = blast_utils.make_blast_db(user_db_name, Path(args.genome).resolve(), facet_prog_dir, args)
-        else:  # user specified location for blastn db
-            dboutput = Path(args.db_dir).resolve()
-            if dboutput.exists() and dboutput.is_dir():
-                dbfilepath = blast_utils.make_blast_db(user_db_name, Path(args.genome).resolve(), str(dboutput), args)
-            else:
-                print("FATAL: User-provided db location \'%s\' does not exist or is not a directory!" % dboutput)
-                exit()
-
-        masker_utils.masker_driver(blast_utils.blast_driver(dbfilepath, args.genome, args.genome, args), args)
+            if args.db_dir == "":  # default location for blastn db (FACET bin)
+                dbfilepath = blast_utils.make_blast_db(user_db_name, Path(args.genome).resolve(), facet_prog_dir, args)
+            else:  # user specified location for blastn db
+                dboutput = Path(args.db_dir).resolve()
+                if dboutput.exists() and dboutput.is_dir():
+                    dbfilepath = blast_utils.make_blast_db(user_db_name, Path(args.genome).resolve(), str(dboutput),
+                                                           args)
+                else:
+                    print("FATAL: User-provided db location \'%s\' does not exist or is not a directory!" % dboutput)
+                    exit()
+            masker_utils.masker_driver(blast_utils.blast_driver(dbfilepath, args.genome, args.genome, args), args)
+        # if there is an outfile
+        else:
+            masker_utils.masker_driver(blast_utils.infile_driver(args.outfile, args), args)
 
     def vc_run(self, args):
         if args.genome == "" and args.outfile == "":
@@ -270,10 +274,20 @@ class ProgParser:
         blast_utils.outfmt_parser(args)
 
         if args.subparser_id in dv.DB_ALIAS:
+            if args.gg_cmp:
+                args.large = True
+                args.noclean = True
+                args.dust = "no"
+                args.blaste = "1e-5"
             if args.verbose:
                 print("Running %s by creating a BLAST database....\n" % dv.PROG_NAME)
             self.database_run(args)
         elif args.subparser_id in dv.FREE_ALIAS:
+            if args.gg_cmp:
+                args.large = True
+                args.noclean = True
+                args.dust = "no"
+                args.blaste = "1e-5"
             if args.verbose:
                 print("Running %s without creating a BLAST database....\n" % dv.PROG_NAME)
             self.db_free_run(args)

@@ -114,6 +114,9 @@ if __name__ == '__main__':
     db_parser.add_argument("--db_dir", type=str, default="", nargs='?',
                            help="Specify a directory to output the BLASTn database created by FACET."
                                 " The default behaviour is to output databases to FACET's bin directory.")
+    db_parser.add_argument("--gg_cmp", action='store_true',
+                           help="Short option for genome x genome comparisons."
+                                " Equivalent to specifying --large, --noclean, --dust no, and --evalue 1e-5")
 
     # ----------------------------------------------------------- #
     # DB_FREE PARSER: run FACET without creating a blast database #
@@ -137,6 +140,9 @@ if __name__ == '__main__':
                                      "with each contig to improve runtime")
     db_free_parser.add_argument("--dust", type=str, default="yes", choices=["yes", "no"],
                                 help="filter low complexity regions in BLAST [default: yes]", nargs='?')
+    db_free_parser.add_argument("--gg_cmp", action='store_true',
+                                help="Short option for genome x genome comparisons."
+                                     " Equivalent to specifying --large, --noclean, --dust no, and --evalue 1e-5")
 
     # -------------------------------------------------------------- #
     # OUTFILE PARSER: run FACET on a pre-generated BLAST output file #
