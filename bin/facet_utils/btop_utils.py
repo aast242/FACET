@@ -263,8 +263,9 @@ def reverse_compliment(btop: str):
 # compare a reference base with an alternative base and return if it matches a possible RIP mutation
 def check_if_ripd(ref_base, alt_base):
     ripq = False
+    alt_lst = [i.upper() for i in alt_base.split(",")]
     try:
-        if alt_base.upper() == dv.RIP_MUT[ref_base.upper()]:
+        if dv.RIP_MUT[ref_base.upper()] in alt_lst:
             ripq = True
     except KeyError:
         pass
