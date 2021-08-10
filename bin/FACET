@@ -285,7 +285,7 @@ if __name__ == '__main__':
         print("\n%s exited due to a recognized fatal error" % dv.PROG_NAME)
         try:
             print("\nAttempting to remove temp directory.")
-            # rmtree(dv.PROG_TEMP_DIR)
+            rmtree(dv.PROG_TEMP_DIR)
             print("Successfully removed temp directory!")
             print("Exiting....")
             exit()
