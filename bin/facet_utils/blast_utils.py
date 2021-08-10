@@ -18,11 +18,19 @@ from .defaults import ProgDefaults as dv
 from . import btop_utils
 from . import masker_utils
 
+# globals are bad, but this is the only way I could get the BLASTn multiprocessing to neatly exit when a process
+# fails. Allows for communication between the pool and the subprocesses called in the execute_blast func
 failed_blast = mp.Event()
 
 
+# gets the state of the failed_blast event
 def get_blast_state():
     return failed_blast.is_set()
+
+
+# sets the state of the failed_blast event
+def set_blast_state():
+    failed_blast.set()
 
 
 # takes a list of lists and retains elements that have no complete overlap with other elements  #
@@ -188,7 +196,7 @@ def make_blast_db(dbname, dbfile, out_dir, args):
         try:
             os.mkdir(out_dir + "/" + dbname)
         except FileExistsError:
-            if args.verbose:
+            if args.verbose and args.large is False:
                 print("Directory \'" + dbname + '\' already exists; using it')
     # checks to see if a blast database of the same name has already been created at the target #
     # If it has, checks to see if permission to overwrite has been granted                      #
@@ -636,6 +644,9 @@ def blast_driver(dbfilepath, subject, query, args):
         multi_pool.join()
         del multi_pool
 
+        if args.verbose:
+            print()
+
         # blasts each contig individually against the genome database #
         avail_blast_cores = dv.AVAIL_CORES
         try:
@@ -643,20 +654,21 @@ def blast_driver(dbfilepath, subject, query, args):
         except AttributeError:
             pass
 
-        def mp_ecb(proc_return):
-            failed_blast.set()
-            sleep(5)
-            multi_pool.terminate()
-            raise Exception("FATAL: error in a child process\n%s" % proc_return)
+        def mp_ecb(proc_return):  # defines an error callback function to correctly exit the pool on blast error
+            set_blast_state()  # sets the failed blast event to true
+            multi_pool.close()  # stops the pool from creating any more jobs
+            sleep(5)  # waits for the execute_blast function to kill running subprocesses
+            multi_pool.terminate()  # terminate the pool
 
         # avail_blast_cores = 3  # TODO: REMOVE THIS LATER; FOR TESTING ONLY
 
         multi_pool = mp.Pool(processes=avail_blast_cores)
 
         for stig in subject_contigs:
+            # defines the subject tig database to use
             curr_stig_db = dv.PROG_TEMP_DIR + "/" + temp_db_name + "/" + \
                            str(Path(Path(stig).resolve().name).with_suffix('')) + "_db.fasta"
-            for qtig in query_contigs:
+            for qtig in query_contigs:  # runs BLAST on each query tig with the subject as db
                 multi_pool.apply_async(execute_blast,
                                        args=(curr_stig_db, qtig, "%s/%s_%s" %
                                              (dv.PROG_TEMP_DIR, Path(stig).stem, Path(qtig).stem),
@@ -666,6 +678,7 @@ def blast_driver(dbfilepath, subject, query, args):
         multi_pool.join()
         del multi_pool
 
+        # if BLAST failed, exit FACET
         if get_blast_state() is True:
             print("FATAL: A BLASTn process did not successfully complete!")
             raise SystemExit
@@ -792,6 +805,8 @@ def blast_driver(dbfilepath, subject, query, args):
 # shortblast has an evalue of 1e-5, normal blast has an evalue of 1e-15       #
 # TODO: implement inverse (run one blast w -sub x -query y; one with -sub y query x); need to normalize output format
 def execute_blast(db, query, outfilename, inverse, args):
+    if get_blast_state() is True:
+        raise Exception("FATAL: A BLASTn process has exited with a non-zero return code")
     # if running db, masker, or vcf module, use -db flag in BLASTn
     if args.subparser_id in dv.DB_ALIAS or args.subparser_id in dv.MASKER_ALIAS or args.subparser_id in dv.VC_ALIAS:
         blastcommand = ['blastn', '-db', db, "-query", query]
@@ -820,7 +835,7 @@ def execute_blast(db, query, outfilename, inverse, args):
     blastcommand.extend(["-evalue", args.blaste])
 
     # add in the -max_target_seqs parameter
-    blastcommand.extend(["-max_target_seqs", dv.BLASTN_MAX_TARGET_SEQS])
+    blastcommand.extend(["-max_target_seqs", str(dv.BLASTN_MAX_TARGET_SEQS)])
 
     # allows user to run BLAST in different modes
     if args.subparser_id in dv.DB_ALIAS or args.subparser_id in dv.FREE_ALIAS:
@@ -834,27 +849,24 @@ def execute_blast(db, query, outfilename, inverse, args):
     # make blast pipe the results to a file in the temp directory
     blastcommand.extend(["-out", outfilename])
 
-    if get_blast_state() is False:
-        blast = subprocess.Popen(blastcommand, stdout=subprocess.PIPE, universal_newlines=True)
-        if args.verbose:
-            printcommand = blastcommand[:-2]  # removes the -out command from the printed command
-            printcommand[len(printcommand) - 1] = "\"" + printcommand[len(printcommand) - 1] + "\""
-            print("\nRunning BLAST (pid: %s) with these options:\n%s\n" % (blast.pid, " ".join(printcommand)), end="")
-    else:
-        print("NOT STARTING BLASTn COMMAND %s" % " ".join(blastcommand))
-        raise Exception("FATAL: A BLASTn process has exited with a non-zero return code")
+    blast = subprocess.Popen(blastcommand, stdout=subprocess.PIPE, universal_newlines=True)
+    if args.verbose:
+        printcommand = blastcommand[:-2]  # removes the -out command from the printed command
+        printcommand[len(printcommand) - 1] = "\"" + printcommand[len(printcommand) - 1] + "\""
+        print("\nRunning BLAST (pid: %s) with these options:\n%s\n" % (blast.pid, " ".join(printcommand)), end="")
 
     while blast.poll() is None:
         if get_blast_state() is True:
+            print("\nKilling BLASTn process %s" % blast.pid)
             blast.kill()
             raise Exception("FATAL: A BLASTn process has exited with a non-zero return code")
-        sleep(2)
+        sleep(1.5)
 
     if blast.returncode != 0:
         raise Exception("FATAL: BLASTn process %s did not have a 0 return code" % blast.pid)
     else:
         if args.verbose:
-            print("BLASTn process %s completed successfully!" % blast.pid)
+            print("\nBLASTn process %s completed successfully!" % blast.pid)
 
     # returns the path to the outfile
     return outfilename

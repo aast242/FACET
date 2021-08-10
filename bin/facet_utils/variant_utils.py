@@ -5,7 +5,7 @@ __author__ = "Alex Stewart"
 
 import csv
 import os
-import time
+import multiprocessing as mp
 from sys import exc_info
 from pathlib import Path
 from shutil import copyfileobj
@@ -15,6 +15,7 @@ from Bio import SeqIO
 
 from .defaults import ProgDefaults as dv
 from . import btop_utils
+from . import blast_utils
 
 
 # driver function for the variant call format module
@@ -52,13 +53,18 @@ def vc_driver(args):
     if args.verbose:
         print("\nParsing \'%s\' to find positions with variant calls...." % Path(args.vcf_file).name)
     # TODO: ADD MULTIPROCESSING AND CHUNKING HERE
-    flush_vcf_file(Path(args.vcf_file).resolve())
 
-    if Path(dv.VCF_VARIANT_TEMPFILE).exists() is False:
-        print("FATAL: FACET could not identify any positions with variant calls in \'%s\'" % Path(args.vcf_file).name)
-        exit()
+    # Get the header for the VCF file so it doesn't mess with things later
+    flush_vcf_header(Path(args.vcf_file).resolve())
 
-    # split SNP_only vcf up into contigs
+    # Chunk VCF file
+    blast_utils.chunk_large_file(Path(args.vcf_file).resolve(), dv.PROG_TEMP_DIR, dv.SMALL_CHUNK_LEN, args)
+
+    # gets the names of the chunks
+    chunk_files = ["%s/%s" % (dv.PROG_TEMP_DIR, i) for i in os.listdir(dv.PROG_TEMP_DIR) if
+                   i.startswith("%s.chunk" % Path(args.vcf_file).name)]
+
+    # make directory to store variants
     try:
         os.mkdir(dv.VCF_TEMPDIR)
     except Exception:
@@ -66,18 +72,35 @@ def vc_driver(args):
     if args.verbose:
         print("Flushing SNPs to files based on contig ID")
 
-    flush_var_to_tigs(dv.VCF_VARIANT_TEMPFILE, dv.VCF_TEMPDIR, dv.VCF_FMT_DICT["chrom"])
+    failed_var_flush = mp.Event()
+    multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
+
+    def var_flush_callback(mp_return):
+        print("VAR CALL FLUSH FAILED!!! RETURN: %s" % mp_return)
+        failed_var_flush.set()
+        multi_pool.close()
+
+    for var_chunk in chunk_files:
+        multi_pool.apply_async(flush_var_to_tigs, args=(var_chunk, dv.VCF_TEMPDIR, dv.VCF_FMT_DICT["chrom"],
+                                                        dv.VCF_FMT_DICT["alt"], args,),
+                               error_callback=var_flush_callback)
+
+    multi_pool.close()
+    multi_pool.join()
+    del multi_pool
+
+    if failed_var_flush.is_set():
+        print("FATAL: There was a problem in flushing variants based on contig ID")
+        raise SystemExit
 
     true_cnt = 0
     false_cnt = 0
 
-    #
     for var_files in ["%s/%s" % (dv.VCF_TEMPDIR, i) for i in os.listdir(dv.VCF_TEMPDIR)]:
         temp_true_cnt, temp_false_cnt = get_var_status(var_files, blast_outfiles, genome_indx, args)
         true_cnt += temp_true_cnt
         false_cnt += temp_false_cnt
 
-    # this can happen if none of the IDs in the
     if false_cnt + true_cnt == 0:
         print("FATAL: No SNPs were identified. Please ensure the VCF file has the same sequence IDs as the FASTA file.")
         exit()
@@ -91,6 +114,30 @@ def vc_driver(args):
         raise
 
     write_vc_files(false_cnt, true_cnt, args)
+
+
+# reads a vcf file line by line and dumps out the header to vcf_header
+def flush_vcf_header(vcf_filepath):
+    header = []
+
+    with open(vcf_filepath, 'r') as f:
+        while True:
+            line = f.readline()
+            if not line:
+                break
+
+            # if there is a leading pound, the line is a header
+            if line[0] == "#":
+                line = line.rstrip().split("\t")
+                header.append(line)
+            else:
+                break
+
+    with open(dv.VCF_HEADER_TEMPFILE, 'a', newline='') as csvfile:
+        filewriter = csv.writer(csvfile, delimiter='\t', escapechar='', quotechar='',
+                                quoting=csv.QUOTE_NONE, lineterminator="\n")
+        for records in header:
+            filewriter.writerow(records)
 
 
 # parses a vcf file and dumps 2 files to tempdir: vcf_header, variants.vcf
@@ -159,10 +206,12 @@ def flush_vcf_file(vcf_filepath):
 
 
 # flush variant file to tig files
-def flush_var_to_tigs(var_file, flushdir, flushindx):
+# flushindx is the contig ID, varindx is the alt column
+def flush_var_to_tigs(var_file, flushdir, flushindx, varindx, args):
     tig_dict = {}
     cycle_count = 0
-
+    if args.verbose:
+        print("Flushing variants in \'%s\' to files based on contig ID...." % var_file)
     with open(var_file, 'r') as f:  # iterate through the file
         while True:
             # read each line
@@ -170,16 +219,22 @@ def flush_var_to_tigs(var_file, flushdir, flushindx):
             # if the line is the last line of the file, exit the loop
             if not line:
                 break
-            cycle_count += 1
+            # skips line if its a header
+            if line[0] == "#":
+                continue
 
             # parse the line
             line = line.rstrip().split("\t")
 
-            # if the tig id is not in the dictionary, add it
-            tig_dict.setdefault(line[flushindx], [])
+            # see if the line has an alt base(s)
+            if line[varindx] != ".":
+                cycle_count += 1
 
-            # append the line to the tig id list in the dictionary
-            tig_dict[line[flushindx]].append(line)
+                # if the tig id is not in the dictionary, add it
+                tig_dict.setdefault(line[flushindx], [])
+
+                # append the line to the tig id list in the dictionary
+                tig_dict[line[flushindx]].append(line)
 
             # flush each contig to a file if there have been enough cycles
             if cycle_count >= dv.FLUSH_LEN:
@@ -208,6 +263,8 @@ def flush_var_to_tigs(var_file, flushdir, flushindx):
                         filewriter.writerow(records)
                     # sets the tig list to empty after it's flushed
                 tig_dict[tig_id] = []
+    if args.verbose:
+        print("Finished flushing %s!" % var_file)
 
 
 # generates a list as long as a contig that contains coverage information at each base
