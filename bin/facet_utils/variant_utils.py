@@ -9,6 +9,7 @@ import multiprocessing as mp
 from sys import exc_info
 from pathlib import Path
 from shutil import copyfileobj
+from operator import itemgetter
 from pprint import pprint
 
 from Bio import SeqIO
@@ -29,6 +30,10 @@ def vc_driver(args):
         print("Indexing %s...." % Path(args.genome).name)
     genome_indx = SeqIO.index(args.genome, 'fasta')
 
+    contig_len = {}
+    for i in genome_indx:
+        contig_len.setdefault(i, len(genome_indx[i]))
+
     # gets organised BLAST hits that have not been cleaned
     blast_outfiles = ["%s/%s" % (dv.PROG_TEMP_DIR, i) for i in os.listdir(dv.PROG_TEMP_DIR)]
 
@@ -48,6 +53,8 @@ def vc_driver(args):
                 break
         if file_exists is False:
             open(empty_fp, 'w').close()
+
+    genome_indx.close()
 
     # get VCF file that contains only SNPs
     if args.verbose:
@@ -76,7 +83,6 @@ def vc_driver(args):
     multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
 
     def var_flush_callback(mp_return):
-        print("VAR CALL FLUSH FAILED!!! RETURN: %s" % mp_return)
         failed_var_flush.set()
         multi_pool.close()
 
@@ -93,13 +99,30 @@ def vc_driver(args):
         print("FATAL: There was a problem in flushing variants based on contig ID")
         raise SystemExit
 
-    true_cnt = 0
-    false_cnt = 0
+    true_cnt = []
+    false_cnt = []
+    multi_pool = mp.Pool(processes=dv.AVAIL_CORES)
+
+    def add_counts(x):
+        true_cnt.append(x[0])
+        false_cnt.append(x[1])
+
+    if args.verbose:
+        print("Finding which variants are called in repetitive regions....")
 
     for var_files in ["%s/%s" % (dv.VCF_TEMPDIR, i) for i in os.listdir(dv.VCF_TEMPDIR)]:
-        temp_true_cnt, temp_false_cnt = get_var_status(var_files, blast_outfiles, genome_indx, args)
-        true_cnt += temp_true_cnt
-        false_cnt += temp_false_cnt
+        multi_pool.apply_async(get_var_status, args=(var_files, blast_outfiles, contig_len, args),
+                               callback=add_counts)
+        # temp_true_cnt, temp_false_cnt = get_var_status(var_files, blast_outfiles, contig_len, args)
+        # true_cnt += temp_true_cnt
+        # false_cnt += temp_false_cnt
+
+    multi_pool.close()
+    multi_pool.join()
+    del multi_pool
+
+    true_cnt = sum(true_cnt)
+    false_cnt = sum(false_cnt)
 
     if false_cnt + true_cnt == 0:
         print("FATAL: No SNPs were identified. Please ensure the VCF file has the same sequence IDs as the FASTA file.")
@@ -112,6 +135,15 @@ def vc_driver(args):
     except Exception:
         print("Problem creating final VCF output directory! Exiting....")
         raise
+
+    ### SORT TRUE AND FALSE SNPs
+    if args.verbose:
+        print("Sorting repetitive variant file....")
+    sort_vcf_file("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_FALSE_SNP_FILE), dv.VCF_FMT_DICT["chrom"], dv.VCF_FMT_DICT["pos"])
+
+    if args.verbose:
+        print("Sorting unique variant file....")
+    sort_vcf_file("%s/%s" % (dv.VCF_TEMPDIR, dv.VCF_TRUE_SNP_FILE), dv.VCF_FMT_DICT["chrom"], dv.VCF_FMT_DICT["pos"])
 
     write_vc_files(false_cnt, true_cnt, args)
 
@@ -273,7 +305,7 @@ def gen_cov_lst(selfblast_outfile, genome_indx, args):
     send = args.outfmt["send"]
 
     chr_name = Path(selfblast_outfile).name.split("_%stemp." % dv.PROG_NAME)[-1]
-    chr_len = len(genome_indx[chr_name])
+    chr_len = genome_indx[chr_name]
     chr_lst = [0] * chr_len
     with open(Path(selfblast_outfile).resolve(), 'r') as curr_file:
         while True:
@@ -603,17 +635,21 @@ def write_vc_files(false_cnt, true_cnt, args):
         f.write('\n')
 
 
-def get_var_status(vcf_varfile, blast_outfile_lst, genome_indx, args):
-    false_cnt = 0
-    true_cnt = 0
-
-    # finds the blast outfile that corresponds with the vcf id
+def get_corr_blast(vcf_varfile, blast_outfile_lst):
     blast_outfile = ""
     vcf_id = Path(vcf_varfile).with_suffix("").name
     for filepath in blast_outfile_lst:
         if Path(filepath).name.split("_%stemp." % dv.PROG_NAME)[-1] == vcf_id:
-            blast_outfile = filepath
-            break
+            return filepath
+    return blast_outfile
+
+
+def get_var_status(vcf_varfile, blast_outfile_lst, genome_indx, args):
+    false_cnt = 0
+    true_cnt = 0
+    blast_outfile = get_corr_blast(vcf_varfile, blast_outfile_lst)
+    vcf_id = Path(vcf_varfile).with_suffix("").name
+
     # if a corresponding BLAST file was not found, exit the program
     if blast_outfile == "":
         print("FATAL: No corresponding BLAST outfile for \'%s\' in VCF. Please ensure this VCF was created"
@@ -711,3 +747,14 @@ def get_transition_muts(varfile_nohead):
             else:
                 tv_muts += 1
     return [ts_muts, tv_muts]
+
+
+def sort_vcf_file(varfile, chromindx, posindx):
+    with open(varfile, 'r') as f:
+        unsorted = sorted(sorted([i.rstrip().split("\t") for i in f.readlines()], key=itemgetter(chromindx)),
+                          key=itemgetter(posindx))
+        with open(varfile, 'w') as nf:
+            while len(unsorted) > 0:
+                nf.write("\t".join(unsorted[0]))
+                del unsorted[0]
+                nf.write("\n")
